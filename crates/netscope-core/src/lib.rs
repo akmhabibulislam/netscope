@@ -1,5 +1,14 @@
+pub mod timeline;
+pub mod profile;
+pub mod quota;
+pub mod custom_rule;
 pub mod sniffer;
+
 pub use sniffer::{CapturedPacketSummary, PacketDirection};
+pub use timeline::{NetworkEvent, TimelineEventType};
+pub use profile::NetworkProfile;
+pub use quota::{DataUsageQuota, QuotaPeriod, QuotaAlertStatus};
+pub use custom_rule::{CustomNetworkRule, RuleAction, RuleCondition};
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -250,6 +259,7 @@ pub struct AppConfig {
     pub dark_theme: bool,
     pub show_tray: bool,
     pub start_minimized: bool,
+    pub active_profile: String,
     pub whitelisted_ips: Vec<String>,
     pub whitelisted_processes: Vec<String>,
 }
@@ -264,6 +274,7 @@ impl Default for AppConfig {
             dark_theme: true,
             show_tray: true,
             start_minimized: false,
+            active_profile: "Default".to_string(),
             whitelisted_ips: vec!["127.0.0.1".to_string(), "::1".to_string()],
             whitelisted_processes: vec!["systemd-resolved".to_string(), "NetworkManager".to_string()],
         }

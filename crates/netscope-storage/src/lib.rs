@@ -1,9 +1,9 @@
 use chrono::{DateTime, Utc};
-use netscope_core::{AlertSeverity, BandwidthSample, DnsRecord, SecurityAlert};
+use netscope_core::{AlertSeverity, BandwidthSample, DnsRecord, NetworkEvent, SecurityAlert, TimelineEventType};
 use rusqlite::{params, Connection};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
-use tracing::{error, info};
+use tracing::info;
 
 #[derive(Clone)]
 pub struct StorageManager {
@@ -86,9 +86,20 @@ impl StorageManager {
                 reviewed INTEGER DEFAULT 0
             );
 
+            CREATE TABLE IF NOT EXISTS network_events (
+                id TEXT PRIMARY KEY,
+                timestamp TEXT NOT NULL,
+                event_type TEXT NOT NULL,
+                title TEXT NOT NULL,
+                details TEXT NOT NULL,
+                process TEXT,
+                ip_or_domain TEXT
+            );
+
             CREATE INDEX IF NOT EXISTS idx_bw_timestamp ON bandwidth_samples(timestamp);
             CREATE INDEX IF NOT EXISTS idx_dns_timestamp ON dns_history(timestamp);
-            CREATE INDEX IF NOT EXISTS idx_alerts_timestamp ON security_alerts(timestamp);",
+            CREATE INDEX IF NOT EXISTS idx_alerts_timestamp ON security_alerts(timestamp);
+            CREATE INDEX IF NOT EXISTS idx_events_timestamp ON network_events(timestamp);",
         )?;
         Ok(())
     }
@@ -147,6 +158,68 @@ impl StorageManager {
             ],
         )?;
         Ok(())
+    }
+
+    pub fn insert_event(&self, event: &NetworkEvent) -> Result<(), anyhow::Error> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT OR REPLACE INTO network_events (id, timestamp, event_type, title, details, process, ip_or_domain)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                event.id,
+                event.timestamp.to_rfc3339(),
+                event.event_type.to_string(),
+                event.title,
+                event.details,
+                event.process,
+                event.ip_or_domain
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_recent_events(&self, limit: usize) -> Result<Vec<NetworkEvent>, anyhow::Error> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, timestamp, event_type, title, details, process, ip_or_domain
+             FROM network_events ORDER BY timestamp DESC LIMIT ?1",
+        )?;
+
+        let rows = stmt.query_map([limit], |row| {
+            let id: String = row.get(0)?;
+            let ts_str: String = row.get(1)?;
+            let ts = DateTime::parse_from_rfc3339(&ts_str)
+                .map(|dt| dt.with_timezone(&Utc))
+                .unwrap_or_else(|_| Utc::now());
+            let ev_str: String = row.get(2)?;
+            let event_type = match ev_str.as_str() {
+                "INTERFACE_CHANGE" => TimelineEventType::InterfaceChanged,
+                "VPN_CHANGE" => TimelineEventType::VpnStateChanged,
+                "CONN_OPEN" => TimelineEventType::ConnectionOpened,
+                "CONN_CLOSE" => TimelineEventType::ConnectionClosed,
+                "DNS_QUERY" => TimelineEventType::DnsQueried,
+                "TRAFFIC_SPIKE" => TimelineEventType::TrafficSpike,
+                "SECURITY_ALERT" => TimelineEventType::SecurityAlert,
+                "QUOTA_WARNING" => TimelineEventType::QuotaWarning,
+                _ => TimelineEventType::ProfileSwitched,
+            };
+
+            Ok(NetworkEvent {
+                id,
+                timestamp: ts,
+                event_type,
+                title: row.get(3)?,
+                details: row.get(4)?,
+                process: row.get(5)?,
+                ip_or_domain: row.get(6)?,
+            })
+        })?;
+
+        let mut events = Vec::new();
+        for r in rows {
+            events.push(r?);
+        }
+        Ok(events)
     }
 
     pub fn get_recent_samples(&self, limit: usize) -> Result<Vec<BandwidthSample>, anyhow::Error> {
@@ -252,5 +325,29 @@ impl StorageManager {
         }
         let data = String::from_utf8(wtr.into_inner()?)?;
         Ok(data)
+    }
+
+    pub fn export_html_report(&self) -> Result<String, anyhow::Error> {
+        let alerts = self.get_recent_alerts(50)?;
+        let events = self.get_recent_events(50)?;
+
+        let mut html = String::from("<!DOCTYPE html><html><head><meta charset='utf-8'><title>NetScope Investigation Report</title>");
+        html.push_str("<style>body{background:#0B0D11;color:#F0F3F8;font-family:sans-serif;padding:30px;} table{width:100%;border-collapse:collapse;margin-top:15px;} th,td{border:1px solid #1E2330;padding:8px 12px;text-align:left;} th{background:#12151C;color:#9AA3B5;} tr:nth-child(even){background:#12151C;}</style></head><body>");
+        html.push_str("<h1>NetScope 2.0 Security & Forensic Investigation Report</h1>");
+        html.push_str(&format!("<p>Generated at: {} UTC</p>", Utc::now().to_rfc3339()));
+        
+        html.push_str("<h2>Recent Security Alerts</h2><table><tr><th>Severity</th><th>Rule</th><th>Title</th><th>Message</th></tr>");
+        for a in alerts {
+            html.push_str(&format!("<tr><td>{}</td><td>{}</td><td>{}</td><td>{}</td></tr>", a.severity, a.rule_id, a.title, a.message));
+        }
+        html.push_str("</table>");
+
+        html.push_str("<h2>Network Event Timeline</h2><table><tr><th>Time</th><th>Type</th><th>Title</th><th>Details</th></tr>");
+        for e in events {
+            html.push_str(&format!("<tr><td>{}</td><td>{}</td><td>{}</td><td>{}</td></tr>", e.timestamp.format("%H:%M:%S"), e.event_type, e.title, e.details));
+        }
+        html.push_str("</table></body></html>");
+
+        Ok(html)
     }
 }

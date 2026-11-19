@@ -14,7 +14,7 @@ pub struct BandwidthGraph {
 impl BandwidthGraph {
     pub fn new() -> Self {
         let drawing_area = DrawingArea::new();
-        drawing_area.set_content_height(140);
+        drawing_area.set_content_height(160);
         drawing_area.set_hexpand(true);
         drawing_area.add_css_class("card");
 
@@ -57,12 +57,12 @@ impl BandwidthGraph {
     }
 
     fn draw_graph(cr: &Context, width: f64, height: f64, rx: &[f64], tx: &[f64]) {
-        // Draw background
-        cr.set_source_rgb(0.098, 0.114, 0.141); // #191D24
+        // Deep obsidian background
+        cr.set_source_rgb(0.043, 0.051, 0.067); // #0B0D11
         let _ = cr.paint();
 
-        // Draw grid lines
-        cr.set_source_rgba(0.2, 0.25, 0.35, 0.3);
+        // Subtle architectural grid
+        cr.set_source_rgba(0.12, 0.14, 0.19, 0.5);
         cr.set_line_width(1.0);
         for i in 1..4 {
             let y = (height / 4.0) * (i as f64);
@@ -75,12 +75,12 @@ impl BandwidthGraph {
         let n = rx.len().max(1);
         let step_x = width / (n as f64 - 1.0).max(1.0);
 
-        // Draw RX (Download - Emerald Green #42C98A)
-        cr.set_source_rgba(0.26, 0.79, 0.54, 0.9);
+        // Download: Emerald Green (#10B981)
+        cr.set_source_rgba(0.06, 0.72, 0.51, 0.95);
         cr.set_line_width(2.0);
         for (i, &val) in rx.iter().enumerate() {
             let x = i as f64 * step_x;
-            let y = height - (val / max_val) * (height - 15.0) - 5.0;
+            let y = height - (val / max_val) * (height - 25.0) - 8.0;
             if i == 0 {
                 cr.move_to(x, y);
             } else {
@@ -89,12 +89,12 @@ impl BandwidthGraph {
         }
         let _ = cr.stroke();
 
-        // Draw TX (Upload - Accent Blue #5B9BFF)
-        cr.set_source_rgba(0.36, 0.61, 1.0, 0.9);
+        // Upload: Accent Blue (#3E7BFA)
+        cr.set_source_rgba(0.24, 0.48, 0.98, 0.95);
         cr.set_line_width(2.0);
         for (i, &val) in tx.iter().enumerate() {
             let x = i as f64 * step_x;
-            let y = height - (val / max_val) * (height - 15.0) - 5.0;
+            let y = height - (val / max_val) * (height - 25.0) - 8.0;
             if i == 0 {
                 cr.move_to(x, y);
             } else {
@@ -103,11 +103,11 @@ impl BandwidthGraph {
         }
         let _ = cr.stroke();
 
-        // Legend / Max Label
-        cr.set_source_rgb(0.57, 0.61, 0.67);
-        cr.set_font_size(10.0);
-        cr.move_to(8.0, 16.0);
+        // Status Header & Metrics
+        cr.set_source_rgb(0.60, 0.64, 0.71);
+        cr.set_font_size(11.0);
+        cr.move_to(12.0, 20.0);
         let max_kbps = max_val / 8000.0;
-        let _ = cr.show_text(&format!("Peak: {:.1} KB/s  |  — Download (Green)  — Upload (Blue)", max_kbps));
+        let _ = cr.show_text(&format!("Peak Bandwidth: {:.1} KB/s   ● Download   ● Upload", max_kbps));
     }
 }

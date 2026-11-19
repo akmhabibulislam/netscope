@@ -13,13 +13,10 @@ members = [
 resolver = "2"
 
 [workspace.package]
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 authors = ["NetScope Contributors <dev@netscope.internal>"]
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/netscope/netscope"
-homepage = "https://github.com/netscope/netscope"
-description = "A professional, cross-distribution Linux network intelligence application."
 
 [package]
 name = "netscope"
@@ -27,7 +24,7 @@ version.workspace = true
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
-description = "NetScope Desktop Application"
+description = "NetScope 2.0 Desktop Application"
 
 [dependencies]
 netscope-core = { path = "crates/netscope-core" }
@@ -40,10 +37,8 @@ netscope-platform = { path = "crates/netscope-platform" }
 
 tokio = { version = "1.38", features = ["full"] }
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 gtk4 = { version = "0.9", features = ["v4_12"] }
 libadwaita = { version = "0.7", features = ["v1_5"] }
-relm4 = { version = "0.9", features = ["libadwaita"] }
 chrono = { version = "0.4", features = ["serde"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"

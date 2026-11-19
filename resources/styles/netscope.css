@@ -1,138 +1,238 @@
-/* NetScope Modern Dark Theme */
+/* NetScope 2.0 Design System — Linear / Raycast / Vercel Minimalist Aesthetic */
+
+:root {
+    --bg-base: #0B0D11;
+    --bg-surface: #12151C;
+    --bg-elevated: #181C26;
+    --bg-overlay: #212735;
+    --border-subtle: #1E2330;
+    --border-strong: #2B3346;
+    --text-primary: #F0F3F8;
+    --text-secondary: #9AA3B5;
+    --text-tertiary: #60687A;
+    --accent-blue: #3E7BFA;
+    --accent-blue-subtle: rgba(62, 123, 250, 0.15);
+    --accent-emerald: #10B981;
+    --accent-emerald-subtle: rgba(16, 185, 129, 0.15);
+    --accent-amber: #F59E0B;
+    --accent-amber-subtle: rgba(245, 158, 11, 0.15);
+    --accent-rose: #EF4444;
+    --accent-rose-subtle: rgba(239, 68, 68, 0.15);
+}
 
 window, .background {
-    background-color: #111318;
-    color: #E8ECF2;
+    background-color: #0B0D11;
+    color: #F0F3F8;
+    font-family: -apple-system, BlinkMacSystemFont, "Inter", "Segoe UI", "Ubuntu", sans-serif;
+    font-size: 13px;
 }
 
 headerbar {
-    background-color: #191D24;
-    border-bottom: 1px solid #282F3D;
-    color: #E8ECF2;
+    background-color: #12151C;
+    border-bottom: 1px solid #1E2330;
+    color: #F0F3F8;
+    min-height: 48px;
+    padding: 0 12px;
 }
 
+/* Sidebar Navigation */
+stacksidebar, .sidebar {
+    background-color: #12151C;
+    border-right: 1px solid #1E2330;
+    padding: 10px 6px;
+}
+
+stacksidebar list {
+    background-color: transparent;
+    border: none;
+}
+
+stacksidebar row {
+    border-radius: 6px;
+    padding: 8px 12px;
+    margin-bottom: 2px;
+    color: #9AA3B5;
+    font-weight: 500;
+    transition: background-color 150ms ease, color 150ms ease;
+    border: none;
+}
+
+stacksidebar row:hover {
+    background-color: #181C26;
+    color: #F0F3F8;
+}
+
+stacksidebar row:selected {
+    background-color: rgba(62, 123, 250, 0.16);
+    color: #3E7BFA;
+    font-weight: 600;
+}
+
+/* View Containers */
 .view-container {
-    background-color: #111318;
-    padding: 16px;
+    background-color: #0B0D11;
+    padding: 24px;
 }
 
+/* Surface Cards & Panels */
 .card {
-    background-color: #191D24;
-    border-radius: 10px;
-    border: 1px solid #252C38;
-    padding: 16px;
-    margin-bottom: 12px;
+    background-color: #12151C;
+    border: 1px solid #1E2330;
+    border-radius: 8px;
+    padding: 18px;
+    margin-bottom: 14px;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.25);
+}
+
+.card:hover {
+    border-color: #2B3346;
+}
+
+/* Typography Hierarchy */
+.heading-1 {
+    font-size: 20px;
+    font-weight: 700;
+    color: #F0F3F8;
+    letter-spacing: -0.3px;
+}
+
+.heading-2 {
+    font-size: 15px;
+    font-weight: 600;
+    color: #F0F3F8;
+    letter-spacing: -0.1px;
 }
 
 .stat-label {
     font-size: 11px;
+    font-weight: 600;
     text-transform: uppercase;
-    color: #929BAA;
-    font-weight: bold;
-    letter-spacing: 0.5px;
+    color: #60687A;
+    letter-spacing: 0.6px;
 }
 
 .stat-value {
-    font-size: 26px;
+    font-size: 28px;
     font-weight: 800;
-    color: #E8ECF2;
+    color: #F0F3F8;
+    letter-spacing: -0.5px;
     margin-top: 4px;
 }
 
-.accent-blue {
-    color: #5B9BFF;
+.subtext {
+    font-size: 12px;
+    color: #9AA3B5;
 }
 
-.accent-green {
-    color: #42C98A;
-}
-
-.accent-yellow {
-    color: #E8B65A;
-}
-
-.accent-red {
-    color: #EA626C;
-}
-
+/* Badges & Micro Tags */
 .badge {
-    border-radius: 6px;
+    border-radius: 4px;
     padding: 2px 8px;
     font-size: 11px;
-    font-weight: bold;
+    font-weight: 600;
+    font-family: monospace;
 }
 
 .badge-info {
-    background-color: rgba(91, 155, 255, 0.2);
-    color: #5B9BFF;
-}
-
-.badge-warning {
-    background-color: rgba(232, 182, 90, 0.2);
-    color: #E8B65A;
-}
-
-.badge-danger {
-    background-color: rgba(234, 98, 108, 0.2);
-    color: #EA626C;
+    background-color: rgba(62, 123, 250, 0.15);
+    color: #60A5FA;
 }
 
 .badge-success {
-    background-color: rgba(66, 201, 138, 0.2);
-    color: #42C98A;
+    background-color: rgba(16, 185, 129, 0.15);
+    color: #34D399;
 }
 
+.badge-warning {
+    background-color: rgba(245, 158, 11, 0.15);
+    color: #FBBF24;
+}
+
+.badge-danger {
+    background-color: rgba(239, 68, 68, 0.15);
+    color: #F87171;
+}
+
+/* Lists & Tables */
 listview, list {
-    background-color: #191D24;
+    background-color: #12151C;
+    border: 1px solid #1E2330;
     border-radius: 8px;
-    border: 1px solid #252C38;
 }
 
 row {
-    padding: 10px 14px;
-    border-bottom: 1px solid #1E242F;
+    padding: 9px 14px;
+    border-bottom: 1px solid #181C26;
+    transition: background-color 100ms ease;
+}
+
+row:last-child {
+    border-bottom: none;
 }
 
 row:hover {
-    background-color: #202633;
+    background-color: #181C26;
 }
 
 row:selected {
-    background-color: #293447;
+    background-color: #212735;
 }
 
+/* Form Controls & Inputs */
 entry, searchbar {
-    background-color: #191D24;
-    border: 1px solid #2B3342;
-    border-radius: 8px;
-    color: #E8ECF2;
+    background-color: #12151C;
+    border: 1px solid #2B3346;
+    border-radius: 6px;
+    color: #F0F3F8;
     padding: 8px 12px;
+    font-size: 13px;
 }
 
 entry:focus {
-    border-color: #5B9BFF;
+    border-color: #3E7BFA;
+    box-shadow: 0 0 0 1px #3E7BFA;
 }
 
+/* Buttons */
 button {
-    background-color: #202633;
-    border: 1px solid #2B3342;
-    color: #E8ECF2;
+    background-color: #181C26;
+    border: 1px solid #2B3346;
+    color: #F0F3F8;
     border-radius: 6px;
     padding: 6px 14px;
-    font-weight: 600;
+    font-weight: 500;
+    transition: all 120ms ease;
 }
 
 button:hover {
-    background-color: #293447;
-    border-color: #5B9BFF;
+    background-color: #212735;
+    border-color: #3E7BFA;
 }
 
 button.suggested-action {
-    background-color: #2354A8;
+    background-color: #3E7BFA;
+    border: 1px solid #3E7BFA;
     color: #FFFFFF;
-    border: none;
+    font-weight: 600;
 }
 
 button.suggested-action:hover {
-    background-color: #316DD3;
+    background-color: #2F6BF0;
 }
+
+button.destructive-action {
+    background-color: rgba(239, 68, 68, 0.2);
+    border: 1px solid rgba(239, 68, 68, 0.4);
+    color: #F87171;
+}
+
+button.destructive-action:hover {
+    background-color: rgba(239, 68, 68, 0.35);
+}
+
+/* Accent Colors */
+.accent-blue { color: #3E7BFA; }
+.accent-green { color: #10B981; }
+.accent-yellow { color: #F59E0B; }
+.accent-red { color: #EF4444; }
+.dim-label { color: #60687A; font-family: monospace; }

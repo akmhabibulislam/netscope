@@ -9,6 +9,7 @@ description = "Network interface statistics, sockets, routes, and diagnostic tes
 [dependencies]
 netscope-core = { path = "../netscope-core" }
 netscope-process = { path = "../netscope-process" }
+netscope-dns = { path = "../netscope-dns" }
 tokio = { version = "1.38", features = ["full"] }
 tracing = "0.1"
 libc = "0.2"

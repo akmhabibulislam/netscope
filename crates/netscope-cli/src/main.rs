@@ -2,7 +2,7 @@ use clap::{Parser, Subcommand};
 use comfy_table::{presets::UTF8_FULL, Cell, Color, Table};
 use netscope_core::Protocol;
 use netscope_dns::DnsInspector;
-use netscope_network::{collector::NetworkCollector, diagnostics::DiagnosticsEngine, firewall::NetworkFirewall, sniffer::LiveTrafficSniffer, wifi::WifiScanner};
+use netscope_network::{collector::NetworkCollector, diagnostics::DiagnosticsEngine, firewall::NetworkFirewall, investigation::Investigator, sniffer::LiveTrafficSniffer, speedtest::SpeedTestEngine, wifi::WifiScanner};
 use netscope_security::SecurityRuleEngine;
 use netscope_storage::StorageManager;
 
@@ -57,6 +57,12 @@ enum Commands {
     Alerts,
     /// Inspect Wi-Fi link parameters and RF signal
     Wifi,
+    /// Run speed and throughput benchmark test
+    Speedtest,
+    /// Forensically investigate an IP address or hostname
+    Investigate {
+        target: String,
+    },
     /// Monitor live inbound & outbound raw network packets in real-time
     Sniff {
         #[arg(short, long, default_value_t = 15)]
@@ -293,6 +299,38 @@ async fn main() -> Result<(), anyhow::Error> {
             } else {
                 println!("No Wi-Fi interface detected on this machine");
             }
+        }
+        Commands::Speedtest => {
+            println!("Benchmarking network performance (latency, jitter, download, upload)...");
+            match SpeedTestEngine::run_benchmark().await {
+                Ok(bench) => {
+                    let mut table = Table::new();
+                    table.load_preset(UTF8_FULL);
+                    table.set_header(vec!["Benchmark Metric", "Result"]);
+                    table.add_row(vec!["Target Server", &bench.server]);
+                    table.add_row(vec!["Ping Latency", &format!("{:.2} ms", bench.latency_ms)]);
+                    table.add_row(vec!["Jitter", &format!("{:.2} ms", bench.jitter_ms)]);
+                    table.add_row(vec!["Download Throughput", &format!("{:.2} Mbps", bench.download_mbps)]);
+                    table.add_row(vec!["Upload Throughput", &format!("{:.2} Mbps", bench.upload_mbps)]);
+                    println!("{table}");
+                }
+                Err(e) => println!("Benchmark error: {}", e),
+            }
+        }
+        Commands::Investigate { target } => {
+            println!("Investigating target '{}'...", target);
+            let rep = Investigator::investigate(&target).await;
+            let mut table = Table::new();
+            table.load_preset(UTF8_FULL);
+            table.set_header(vec!["Property", "Details"]);
+            table.add_row(vec!["Target Query", &rep.query]);
+            table.add_row(vec!["Classification", if rep.is_private { "Private (RFC 1918)" } else { "Public Internet Target" }]);
+            table.add_row(vec!["Reputation", &rep.reputation_score]);
+            table.add_row(vec!["Resolved IPs", &rep.resolved_ips.join(", ")]);
+            table.add_row(vec!["Reverse DNS", &rep.reverse_dns.unwrap_or_else(|| "None".to_string())]);
+            table.add_row(vec!["Network ASN / Org", &rep.asn.unwrap_or_else(|| "Local Subnet".to_string())]);
+            table.add_row(vec!["Country / Transit", &rep.country.unwrap_or_else(|| "Local".to_string())]);
+            println!("{table}");
         }
         Commands::Sniff { count } => {
             println!("Starting live packet sniffer stream (observing inbound & outbound traffic)...");
