@@ -1,7 +1,7 @@
 [Desktop Entry]
 Name=NetScope
 Comment=Professional, Cross-Distribution Linux Network Intelligence
-Exec=netscope-gui
+Exec=/usr/bin/netscope-gui
 Icon=netscope
 Terminal=false
 Type=Application
