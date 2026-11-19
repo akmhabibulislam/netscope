@@ -1,0 +1,40 @@
+name: Build Packages
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+jobs:
+  build-release:
+    name: Build Linux Release Binaries
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Install System Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgtk-4-dev libadwaita-1-dev libsqlite3-dev libcap2-bin pkg-config
+
+      - name: Set up Rust Toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Compile Release Binaries
+        run: cargo build --release --workspace
+
+      - name: Package Tarball
+        run: |
+          mkdir -p dist
+          tar -czf dist/netscope-linux-x86_64.tar.gz -C target/release netscope netscope-cli
+
+      - name: Upload Release Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: netscope-binaries
+          path: dist/netscope-linux-x86_64.tar.gz

@@ -1,0 +1,46 @@
+name: Bug Report
+description: Create a report to help us improve NetScope
+labels: ["bug", "triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thank you for reporting an issue! Please provide as much detail as possible.
+  - type: textarea
+    id: description
+    attributes:
+      label: Bug Description
+      description: A clear and concise description of what the bug is.
+    validations:
+      required: true
+  - type: input
+    id: system_info
+    attributes:
+      label: Linux Distribution & Version
+      placeholder: e.g. Arch Linux, CachyOS, Fedora 40, Ubuntu 24.04
+    validations:
+      required: true
+  - type: input
+    id: desktop_env
+    attributes:
+      label: Desktop Environment / Compositor
+      placeholder: e.g. GNOME 46 (Wayland), KDE Plasma 6 (Wayland), Hyprland, Sway, Xfce (X11)
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to Reproduce
+      description: How can we trigger the issue?
+      placeholder: |
+        1. Open NetScope
+        2. Click on 'Live Packets'
+        3. Observe ...
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant Logs or Terminal Output
+      description: Paste any terminal logs or stack traces here.
+      render: shell
