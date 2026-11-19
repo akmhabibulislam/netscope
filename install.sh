@@ -51,7 +51,12 @@ echo "Installed: $BIN_DIR/netscope"
 
 echo "Installing desktop shortcut & icon..."
 install -Dm644 "$ICON_SRC" "$ICON_DIR/netscope.svg"
-install -Dm644 "$DESKTOP_SRC" "$APP_DIR/netscope.desktop"
+
+# Dynamic Exec path resolution:
+# Ensure desktop launcher points to the exact absolute binary path of the target prefix
+sed "s|^Exec=.*|Exec=$BIN_DIR/netscope-gui|" "$DESKTOP_SRC" > "$APP_DIR/netscope.desktop"
+chmod 644 "$APP_DIR/netscope.desktop"
+echo "Configured launcher: $APP_DIR/netscope.desktop -> $BIN_DIR/netscope-gui"
 
 # Optional: setcap for unprivileged raw packet capture if running as root or with sudo
 if command -v setcap >/dev/null 2>&1; then
@@ -76,4 +81,4 @@ fi
 echo ""
 echo "=== NetScope Successfully Installed! ==="
 echo "Launch from your desktop application launcher (App Menu / Rofi / Wofi / GNOME / KDE)"
-echo "Or run in terminal: netscope"
+echo "Or run in terminal: $BIN_DIR/netscope"
