@@ -1,0 +1,10 @@
+[Desktop Entry]
+Name=NetScope
+Comment=Professional, Cross-Distribution Linux Network Intelligence
+Exec=netscope-gui
+Icon=netscope
+Terminal=false
+Type=Application
+Categories=Network;Monitor;Security;System;
+StartupNotify=true
+Keywords=network;bandwidth;connections;traffic;security;dns;diagnostics;

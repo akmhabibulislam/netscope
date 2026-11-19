@@ -1,0 +1,17 @@
+[package]
+name = "netscope-dns"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "DNS configuration inspection, resolver diagnostics, and history for NetScope"
+
+[dependencies]
+netscope-core = { path = "../netscope-core" }
+tokio = { version = "1.38", features = ["full"] }
+tracing = "0.1"
+serde = { version = "1.0", features = ["derive"] }
+chrono = { version = "0.4", features = ["serde"] }
+thiserror = "1.0"
+anyhow = "1.0"
+trust-dns-resolver = "0.23"

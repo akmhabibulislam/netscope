@@ -1,0 +1,138 @@
+/* NetScope Modern Dark Theme */
+
+window, .background {
+    background-color: #111318;
+    color: #E8ECF2;
+}
+
+headerbar {
+    background-color: #191D24;
+    border-bottom: 1px solid #282F3D;
+    color: #E8ECF2;
+}
+
+.view-container {
+    background-color: #111318;
+    padding: 16px;
+}
+
+.card {
+    background-color: #191D24;
+    border-radius: 10px;
+    border: 1px solid #252C38;
+    padding: 16px;
+    margin-bottom: 12px;
+}
+
+.stat-label {
+    font-size: 11px;
+    text-transform: uppercase;
+    color: #929BAA;
+    font-weight: bold;
+    letter-spacing: 0.5px;
+}
+
+.stat-value {
+    font-size: 26px;
+    font-weight: 800;
+    color: #E8ECF2;
+    margin-top: 4px;
+}
+
+.accent-blue {
+    color: #5B9BFF;
+}
+
+.accent-green {
+    color: #42C98A;
+}
+
+.accent-yellow {
+    color: #E8B65A;
+}
+
+.accent-red {
+    color: #EA626C;
+}
+
+.badge {
+    border-radius: 6px;
+    padding: 2px 8px;
+    font-size: 11px;
+    font-weight: bold;
+}
+
+.badge-info {
+    background-color: rgba(91, 155, 255, 0.2);
+    color: #5B9BFF;
+}
+
+.badge-warning {
+    background-color: rgba(232, 182, 90, 0.2);
+    color: #E8B65A;
+}
+
+.badge-danger {
+    background-color: rgba(234, 98, 108, 0.2);
+    color: #EA626C;
+}
+
+.badge-success {
+    background-color: rgba(66, 201, 138, 0.2);
+    color: #42C98A;
+}
+
+listview, list {
+    background-color: #191D24;
+    border-radius: 8px;
+    border: 1px solid #252C38;
+}
+
+row {
+    padding: 10px 14px;
+    border-bottom: 1px solid #1E242F;
+}
+
+row:hover {
+    background-color: #202633;
+}
+
+row:selected {
+    background-color: #293447;
+}
+
+entry, searchbar {
+    background-color: #191D24;
+    border: 1px solid #2B3342;
+    border-radius: 8px;
+    color: #E8ECF2;
+    padding: 8px 12px;
+}
+
+entry:focus {
+    border-color: #5B9BFF;
+}
+
+button {
+    background-color: #202633;
+    border: 1px solid #2B3342;
+    color: #E8ECF2;
+    border-radius: 6px;
+    padding: 6px 14px;
+    font-weight: 600;
+}
+
+button:hover {
+    background-color: #293447;
+    border-color: #5B9BFF;
+}
+
+button.suggested-action {
+    background-color: #2354A8;
+    color: #FFFFFF;
+    border: none;
+}
+
+button.suggested-action:hover {
+    background-color: #316DD3;
+}

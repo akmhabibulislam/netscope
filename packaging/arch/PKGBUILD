@@ -1,0 +1,31 @@
+# Maintainer: NetScope Contributors <dev@netscope.internal>
+pkgname=netscope
+pkgver=0.1.0
+pkgrel=1
+pkgdesc="A professional, cross-distribution Linux network intelligence application"
+arch=('x86_64')
+url="https://github.com/netscope/netscope"
+license=('MIT' 'Apache-2.0')
+depends=('gtk4' 'libadwaita' 'sqlite' 'iproute2')
+makedepends=('cargo' 'rust' 'pkgconf')
+source=("$pkgname-$pkgver.tar.gz::$url/archive/v$pkgver.tar.gz")
+sha256sums=('SKIP')
+
+build() {
+    cd "$pkgname-$pkgver"
+    cargo build --release --locked --workspace
+}
+
+check() {
+    cd "$pkgname-$pkgver"
+    cargo test --release --locked --workspace
+}
+
+package() {
+    cd "$pkgname-$pkgver"
+    install -Dm755 "target/release/netscope" "$pkgdir/usr/bin/netscope-gui"
+    install -Dm755 "target/release/netscope" "$pkgdir/usr/bin/netscope"
+    install -Dm644 "resources/netscope.desktop" "$pkgdir/usr/share/applications/netscope.desktop"
+    install -Dm644 "resources/icons/netscope.svg" "$pkgdir/usr/share/icons/hicolor/scalable/apps/netscope.svg"
+    install -Dm644 "README.md" "$pkgdir/usr/share/doc/$pkgname/README.md"
+}

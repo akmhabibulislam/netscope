@@ -1,0 +1,14 @@
+[package]
+name = "netscope-platform"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Desktop integration, notifications, and Linux system interactions for NetScope"
+
+[dependencies]
+netscope-core = { path = "../netscope-core" }
+tracing = "0.1"
+notify-rust = "4.11"
+thiserror = "1.0"
+anyhow = "1.0"

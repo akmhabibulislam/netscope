@@ -1,0 +1,16 @@
+[package]
+name = "netscope-security"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Network anomaly detection, rule engine, and alerts for NetScope"
+
+[dependencies]
+netscope-core = { path = "../netscope-core" }
+tracing = "0.1"
+serde = { version = "1.0", features = ["derive"] }
+chrono = { version = "0.4", features = ["serde"] }
+thiserror = "1.0"
+anyhow = "1.0"
+ipnetwork = "0.20"
