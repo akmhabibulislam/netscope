@@ -7,6 +7,7 @@ use netscope_dns::DnsInspector;
 use netscope_network::collector::NetworkCollector;
 use netscope_network::diagnostics::DiagnosticsEngine;
 use netscope_network::firewall::NetworkFirewall;
+use netscope_network::sniffer::LiveTrafficSniffer;
 use netscope_network::wifi::WifiScanner;
 use netscope_security::SecurityRuleEngine;
 use netscope_storage::StorageManager;
@@ -49,6 +50,8 @@ fn build_ui(app: &Application) {
     let collector = NetworkCollector::new();
     let storage = StorageManager::new(None).unwrap_or_else(|_| StorageManager::new_in_memory().unwrap());
     let rule_engine = Rc::new(RefCell::new(SecurityRuleEngine::new(vec![], vec![])));
+    let sniffer = LiveTrafficSniffer::new();
+    let _ = sniffer.start_capture();
 
     let window = ApplicationWindow::builder()
         .application(app)
@@ -81,6 +84,10 @@ fn build_ui(app: &Application) {
     // 2. Connections View
     let (conn_view, update_conn) = create_connections_page(&collector, rt.clone());
     stack.add_titled(&conn_view, Some("connections"), "Connections");
+
+    // 2.5 Live Packets & Data Stream View
+    let (packets_view, update_packets) = create_packets_page(&sniffer);
+    stack.add_titled(&packets_view, Some("packets"), "Live Packets (In/Out)");
 
     // 3. Processes View
     let (proc_view, update_proc) = create_processes_page(&collector, rt.clone());
@@ -116,6 +123,7 @@ fn build_ui(app: &Application) {
     // Initial load
     update_dash();
     update_conn();
+    update_packets();
     update_proc();
     update_dns();
     update_wifi();
@@ -124,6 +132,7 @@ fn build_ui(app: &Application) {
     // Periodic timer (1.5 seconds) for real-time monitoring
     glib::timeout_add_local(std::time::Duration::from_millis(1500), move || {
         update_dash();
+        update_packets();
         update_sec();
         glib::ControlFlow::Continue
     });
@@ -363,6 +372,96 @@ fn create_connections_page(
     let update_clone = update_fn.clone();
     refresh_btn.connect_clicked(move |_| {
         update_clone();
+    });
+
+    (container, update_fn)
+}
+
+fn create_packets_page(sniffer: &LiveTrafficSniffer) -> (GtkBox, Rc<dyn Fn()>) {
+    let container = GtkBox::new(Orientation::Vertical, 12);
+    container.add_css_class("view-container");
+
+    let top_bar = GtkBox::new(Orientation::Horizontal, 12);
+    let title = Label::new(Some("Live Packet Stream (Inbound & Outbound Data)"));
+    title.add_css_class("title-1");
+    top_bar.append(&title);
+
+    let info_badge = Label::new(Some("Real-Time In/Out Inspector"));
+    info_badge.add_css_class("badge");
+    info_badge.add_css_class("badge-info");
+    top_bar.append(&info_badge);
+    container.append(&top_bar);
+
+    let scrolled = gtk4::ScrolledWindow::new();
+    scrolled.set_vexpand(true);
+
+    let list_box = gtk4::ListBox::new();
+    list_box.add_css_class("card");
+    scrolled.set_child(Some(&list_box));
+    container.append(&scrolled);
+
+    let sniffer_clone = sniffer.clone();
+    let list_clone = list_box.clone();
+
+    let update_fn: Rc<dyn Fn()> = Rc::new(move || {
+        let packets = sniffer_clone.get_recent_packets(60);
+
+        while let Some(child) = list_clone.first_child() {
+            list_clone.remove(&child);
+        }
+
+        for pkt in packets {
+            let row = GtkBox::new(Orientation::Horizontal, 12);
+            row.set_margin_top(4);
+            row.set_margin_bottom(4);
+            row.set_margin_start(10);
+            row.set_margin_end(10);
+
+            let dir_badge = Label::new(Some(&pkt.direction.to_string()));
+            dir_badge.add_css_class("badge");
+            dir_badge.add_css_class(match pkt.direction {
+                netscope_core::PacketDirection::Inbound => "badge-success",
+                netscope_core::PacketDirection::Outbound => "badge-danger",
+            });
+            dir_badge.set_width_chars(10);
+
+            let proto_badge = Label::new(Some(&pkt.protocol));
+            proto_badge.add_css_class("badge");
+            proto_badge.add_css_class("badge-info");
+            proto_badge.set_width_chars(8);
+
+            let src_lbl = Label::new(Some(&format!("{}:{}", pkt.src_addr, pkt.src_port.unwrap_or(0))));
+            src_lbl.set_width_chars(21);
+            src_lbl.set_halign(gtk4::Align::Start);
+
+            let arrow = Label::new(Some(match pkt.direction {
+                netscope_core::PacketDirection::Inbound => "← [IN]",
+                netscope_core::PacketDirection::Outbound => "→ [OUT]",
+            }));
+            arrow.add_css_class("stat-label");
+
+            let dst_lbl = Label::new(Some(&format!("{}:{}", pkt.dst_addr, pkt.dst_port.unwrap_or(0))));
+            dst_lbl.set_width_chars(21);
+            dst_lbl.set_halign(gtk4::Align::Start);
+
+            let len_lbl = Label::new(Some(&format!("{} B", pkt.length_bytes)));
+            len_lbl.set_width_chars(8);
+            len_lbl.add_css_class("dim-label");
+
+            let summary_lbl = Label::new(Some(&pkt.summary));
+            summary_lbl.set_halign(gtk4::Align::Start);
+            summary_lbl.set_hexpand(true);
+
+            row.append(&dir_badge);
+            row.append(&proto_badge);
+            row.append(&src_lbl);
+            row.append(&arrow);
+            row.append(&dst_lbl);
+            row.append(&len_lbl);
+            row.append(&summary_lbl);
+
+            list_clone.append(&row);
+        }
     });
 
     (container, update_fn)

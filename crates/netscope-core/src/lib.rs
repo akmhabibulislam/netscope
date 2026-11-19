@@ -1,3 +1,6 @@
+pub mod sniffer;
+pub use sniffer::{CapturedPacketSummary, PacketDirection};
+
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::net::IpAddr;

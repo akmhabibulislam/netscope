@@ -2,7 +2,7 @@ use clap::{Parser, Subcommand};
 use comfy_table::{presets::UTF8_FULL, Cell, Color, Table};
 use netscope_core::Protocol;
 use netscope_dns::DnsInspector;
-use netscope_network::{collector::NetworkCollector, diagnostics::DiagnosticsEngine, firewall::NetworkFirewall, wifi::WifiScanner};
+use netscope_network::{collector::NetworkCollector, diagnostics::DiagnosticsEngine, firewall::NetworkFirewall, sniffer::LiveTrafficSniffer, wifi::WifiScanner};
 use netscope_security::SecurityRuleEngine;
 use netscope_storage::StorageManager;
 
@@ -57,6 +57,11 @@ enum Commands {
     Alerts,
     /// Inspect Wi-Fi link parameters and RF signal
     Wifi,
+    /// Monitor live inbound & outbound raw network packets in real-time
+    Sniff {
+        #[arg(short, long, default_value_t = 15)]
+        count: usize,
+    },
     /// Terminate an active TCP connection (requires privileges)
     Kill {
         #[arg(short, long)]
@@ -288,6 +293,36 @@ async fn main() -> Result<(), anyhow::Error> {
             } else {
                 println!("No Wi-Fi interface detected on this machine");
             }
+        }
+        Commands::Sniff { count } => {
+            println!("Starting live packet sniffer stream (observing inbound & outbound traffic)...");
+            let sniffer = LiveTrafficSniffer::new();
+            let _ = sniffer.start_capture();
+
+            tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+            let packets = sniffer.get_recent_packets(count);
+
+            let mut table = Table::new();
+            table.load_preset(UTF8_FULL);
+            table.set_header(vec!["Dir", "Proto", "Source", "Destination", "Bytes", "Summary"]);
+
+            for p in packets {
+                let dir_cell = Cell::new(p.direction.to_string()).fg(match p.direction {
+                    netscope_core::PacketDirection::Inbound => Color::Green,
+                    netscope_core::PacketDirection::Outbound => Color::Red,
+                });
+
+                table.add_row(vec![
+                    dir_cell,
+                    Cell::new(p.protocol),
+                    Cell::new(format!("{}:{}", p.src_addr, p.src_port.unwrap_or(0))),
+                    Cell::new(format!("{}:{}", p.dst_addr, p.dst_port.unwrap_or(0))),
+                    Cell::new(p.length_bytes.to_string()),
+                    Cell::new(p.summary),
+                ]);
+            }
+            println!("{table}");
+            sniffer.stop_capture();
         }
         Commands::Kill { src, dst } => {
             println!("Attempting socket drop for {} -> {}...", src, dst);

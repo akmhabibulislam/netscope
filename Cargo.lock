@@ -1532,6 +1532,7 @@ dependencies = [
  "anyhow",
  "chrono",
  "ipnetwork",
+ "libc",
  "netscope-core",
  "netscope-process",
  "reqwest",
