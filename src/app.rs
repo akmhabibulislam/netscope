@@ -606,9 +606,9 @@ fn create_packets_page(state: &AppState) -> (GtkBox, Rc<dyn Fn()>) {
     let perm_banner = GtkBox::new(Orientation::Horizontal, 10);
     perm_banner.add_css_class("card");
     let perm_lbl = Label::new(Some(if state.sniffer.has_raw_permission() {
-        "Live AF_PACKET kernel socket attached. Capturing authentic hardware-level Ethernet frames, IPv4, IPv6, and TCP/UDP/ICMP payloads in real-time."
+        "Live AF_PACKET kernel socket active. Dissecting real-time Ethernet frames, 802.1Q VLANs, IPv4/IPv6 headers, and TCP/UDP transport endpoints."
     } else {
-        "AF_PACKET raw socket permission denied. To enable hardware-level packet capture without running as root, grant: sudo setcap cap_net_raw,cap_net_admin+eip <binary>. NetScope operates under an honest zero-simulation policy and will not generate synthetic packet data."
+        "AF_PACKET raw socket permission denied. To enable kernel-level live packet capture without running as root, grant: sudo setcap cap_net_raw,cap_net_admin+eip <binary>. NetScope operates under an honest zero-simulation policy and will not display synthetic packet data."
     }));
     perm_lbl.set_wrap(true);
     perm_lbl.set_halign(gtk4::Align::Start);

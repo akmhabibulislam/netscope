@@ -40,7 +40,8 @@ impl NetworkFirewall {
         }
     }
 
-    /// Block a specific remote IP using iptables or nftables after strict IP validation
+    /// Block a specific remote IP using iptables (for IPv4) or ip6tables (for IPv6).
+    /// Checks for existing rules first to prevent duplicate insertion.
     pub fn block_ip(ip_str: &str) -> Result<String, String> {
         info!("Attempting to block IP: {}", ip_str);
 
@@ -56,13 +57,29 @@ impl NetworkFirewall {
             return Err("Safety error: Refusing to block unspecified address (0.0.0.0 / ::)".to_string());
         }
 
-        let output = Command::new("iptables")
-            .args(["-A", "OUTPUT", "-d", &ip.to_string(), "-j", "DROP"])
+        let (cmd, target_str) = match ip {
+            IpAddr::V4(v4) => ("iptables", v4.to_string()),
+            IpAddr::V6(v6) => ("ip6tables", v6.to_string()),
+        };
+
+        // 1. Prevent duplicate rules: check if rule already exists
+        if let Ok(check) = Command::new(cmd)
+            .args(["-C", "OUTPUT", "-d", &target_str, "-j", "DROP"])
             .output()
-            .map_err(|e| format!("Failed to invoke iptables: {}", e))?;
+        {
+            if check.status.success() {
+                return Ok(format!("IP {} is already blocked in {} OUTPUT chain", ip, cmd));
+            }
+        }
+
+        // 2. Insert rule
+        let output = Command::new(cmd)
+            .args(["-A", "OUTPUT", "-d", &target_str, "-j", "DROP"])
+            .output()
+            .map_err(|e| format!("Failed to invoke {}: {}", cmd, e))?;
 
         if output.status.success() {
-            Ok(format!("IP {} blocked via netfilter (OUTPUT DROP)", ip))
+            Ok(format!("IP {} blocked via netfilter ({} OUTPUT DROP)", ip, cmd))
         } else {
             let err = String::from_utf8_lossy(&output.stderr);
             Err(if err.contains("Permission denied") || err.contains("superuser") {
@@ -73,64 +90,98 @@ impl NetworkFirewall {
         }
     }
 
-    /// Unblock a previously blocked IP
+    /// Unblock a previously blocked IP, removing all matching occurrences
     pub fn unblock_ip(ip_str: &str) -> Result<String, String> {
         let ip = IpAddr::from_str(ip_str.trim())
             .map_err(|_| format!("Invalid IP address format: '{}'", ip_str))?;
 
-        let output = Command::new("iptables")
-            .args(["-D", "OUTPUT", "-d", &ip.to_string(), "-j", "DROP"])
-            .output()
-            .map_err(|e| format!("Failed to invoke iptables: {}", e))?;
+        let (cmd, target_str) = match ip {
+            IpAddr::V4(v4) => ("iptables", v4.to_string()),
+            IpAddr::V6(v6) => ("ip6tables", v6.to_string()),
+        };
 
-        if output.status.success() {
-            Ok(format!("IP {} unblocked successfully", ip))
-        } else {
-            let err = String::from_utf8_lossy(&output.stderr);
-            Err(err.trim().to_string())
-        }
-    }
-
-    /// Emergency Kill-Switch: Drops all non-loopback outbound traffic
-    pub fn activate_emergency_killswitch() -> Result<String, String> {
-        // Drop all output except to loopback (lo)
-        let output = Command::new("iptables")
-            .args(["-I", "OUTPUT", "1", "!", "-o", "lo", "-j", "DROP"])
-            .output()
-            .map_err(|e| format!("Failed to invoke iptables: {}", e))?;
-
-        if output.status.success() {
-            Ok("Emergency kill-switch active: all outbound non-loopback traffic blocked".to_string())
-        } else {
-            let err = String::from_utf8_lossy(&output.stderr);
-            Err(err.trim().to_string())
-        }
-    }
-
-    /// Deactivate emergency killswitch
-    pub fn deactivate_emergency_killswitch() -> Result<String, String> {
-        let output = Command::new("iptables")
-            .args(["-D", "OUTPUT", "!", "-o", "lo", "-j", "DROP"])
-            .output()
-            .map_err(|e| format!("Failed to invoke iptables: {}", e))?;
-
-        if output.status.success() {
-            Ok("Emergency kill-switch deactivated".to_string())
-        } else {
-            let err = String::from_utf8_lossy(&output.stderr);
-            Err(err.trim().to_string())
-        }
-    }
-
-    /// Checks if the emergency killswitch rule is currently present in iptables
-    pub fn emergency_killswitch_status() -> bool {
-        if let Ok(output) = Command::new("iptables")
-            .args(["-C", "OUTPUT", "!", "-o", "lo", "-j", "DROP"])
+        let mut removed_count = 0;
+        // Loop to clear duplicates if any were previously inserted
+        while let Ok(output) = Command::new(cmd)
+            .args(["-D", "OUTPUT", "-d", &target_str, "-j", "DROP"])
             .output()
         {
-            return output.status.success();
+            if output.status.success() {
+                removed_count += 1;
+            } else {
+                break;
+            }
         }
-        false
+
+        if removed_count > 0 {
+            Ok(format!("IP {} unblocked successfully (removed {} rule(s))", ip, removed_count))
+        } else {
+            Err(format!("No active block rule found for IP {}", ip))
+        }
+    }
+
+    /// Emergency Kill-Switch: Drops ALL non-loopback inbound and outbound traffic
+    /// for both IPv4 and IPv6 without creating duplicate rules.
+    pub fn activate_emergency_killswitch() -> Result<String, String> {
+        let rules = [
+            ("iptables", "OUTPUT", vec!["-I", "OUTPUT", "1", "!", "-o", "lo", "-j", "DROP"]),
+            ("iptables", "INPUT", vec!["-I", "INPUT", "1", "!", "-i", "lo", "-j", "DROP"]),
+            ("ip6tables", "OUTPUT", vec!["-I", "OUTPUT", "1", "!", "-o", "lo", "-j", "DROP"]),
+            ("ip6tables", "INPUT", vec!["-I", "INPUT", "1", "!", "-i", "lo", "-j", "DROP"]),
+        ];
+
+        // Ensure we don't duplicate if already active
+        if Self::emergency_killswitch_status() {
+            return Ok("Emergency killswitch is already active".to_string());
+        }
+
+        for (cmd, _chain, args) in rules {
+            let output = Command::new(cmd)
+                .args(&args)
+                .output()
+                .map_err(|e| format!("Failed to invoke {}: {}", cmd, e))?;
+
+            if !output.status.success() {
+                let err = String::from_utf8_lossy(&output.stderr);
+                return Err(format!("{} killswitch activation failed: {}", cmd, err.trim()));
+            }
+        }
+
+        Ok("Emergency kill-switch active: all inbound and outbound non-loopback traffic blocked".to_string())
+    }
+
+    /// Deactivates emergency killswitch by clearing all associated DROP rules
+    pub fn deactivate_emergency_killswitch() -> Result<String, String> {
+        let rules = [
+            ("iptables", vec!["-D", "OUTPUT", "!", "-o", "lo", "-j", "DROP"]),
+            ("iptables", vec!["-D", "INPUT", "!", "-i", "lo", "-j", "DROP"]),
+            ("ip6tables", vec!["-D", "OUTPUT", "!", "-o", "lo", "-j", "DROP"]),
+            ("ip6tables", vec!["-D", "INPUT", "!", "-i", "lo", "-j", "DROP"]),
+        ];
+
+        for (cmd, args) in rules {
+            // Remove all matching rules in case duplicates exist
+            while let Ok(output) = Command::new(cmd).args(&args).output() {
+                if !output.status.success() {
+                    break;
+                }
+            }
+        }
+
+        Ok("Emergency kill-switch deactivated: network traffic restored".to_string())
+    }
+
+    /// Checks if emergency killswitch rules are currently active
+    pub fn emergency_killswitch_status() -> bool {
+        let out_check = Command::new("iptables")
+            .args(["-C", "OUTPUT", "!", "-o", "lo", "-j", "DROP"])
+            .output();
+
+        let in_check = Command::new("iptables")
+            .args(["-C", "INPUT", "!", "-i", "lo", "-j", "DROP"])
+            .output();
+
+        matches!((out_check, in_check), (Ok(o), Ok(i)) if o.status.success() || i.status.success())
     }
 
     fn parse_socket_endpoint(endpoint: &str) -> Option<(IpAddr, u16)> {

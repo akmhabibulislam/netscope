@@ -131,11 +131,13 @@ async fn main() -> Result<(), anyhow::Error> {
             }
             println!("{table}");
         }
-        Commands::Traffic { interface: _ } => {
-            println!("Monitoring live bandwidth (Ctrl+C to stop)...");
-            for _ in 0..5 {
+        Commands::Traffic { interface } => {
+            let iface_desc = interface.as_deref().unwrap_or("all active interfaces");
+            println!("Monitoring live bandwidth on {} (Press Ctrl+C to stop)...", iface_desc);
+            
+            loop {
                 tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
-                let sample = collector.collect_bandwidth_sample().await;
+                let sample = collector.collect_bandwidth_sample_for(interface.as_deref()).await;
                 println!(
                     "[{}] Rx: {:.2} Kbps | Tx: {:.2} Kbps | Total Rx: {} KB | Total Tx: {} KB",
                     sample.active_interface.as_deref().unwrap_or("any"),
@@ -333,18 +335,41 @@ async fn main() -> Result<(), anyhow::Error> {
             println!("{table}");
         }
         Commands::Sniff { count } => {
-            println!("Starting live packet sniffer stream (observing inbound & outbound traffic)...");
+            println!("Starting live packet sniffer stream (target: {} packets, Ctrl+C to cancel)...", count);
             let sniffer = LiveTrafficSniffer::new();
-            let _ = sniffer.start_capture();
+            if let Err(e) = sniffer.start_capture() {
+                println!("Error initializing sniffer: {}", e);
+                return Ok(());
+            }
 
-            tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
-            let packets = sniffer.get_recent_packets(count);
+            // Wait up to 10 seconds or until requested count is reached
+            let start_time = std::time::Instant::now();
+            let mut captured = Vec::new();
+            while start_time.elapsed() < std::time::Duration::from_secs(10) {
+                tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+                let current = sniffer.get_recent_packets(count);
+                if current.len() >= count || !sniffer.is_running() {
+                    captured = current;
+                    break;
+                }
+            }
+
+            if captured.is_empty() {
+                captured = sniffer.get_recent_packets(count);
+            }
+
+            if !sniffer.has_raw_permission() {
+                println!("\n[!] AF_PACKET raw socket permission denied: CAP_NET_RAW capability required.");
+                println!("    Grant capability via: sudo setcap cap_net_raw,cap_net_admin+eip $(which netscope-cli)");
+                println!("    No fake or simulated packets generated.\n");
+                return Ok(());
+            }
 
             let mut table = Table::new();
             table.load_preset(UTF8_FULL);
             table.set_header(vec!["Dir", "Proto", "Source", "Destination", "Bytes", "Summary"]);
 
-            for p in packets {
+            for p in captured {
                 let dir_cell = Cell::new(p.direction.to_string()).fg(match p.direction {
                     netscope_core::PacketDirection::Inbound => Color::Green,
                     netscope_core::PacketDirection::Outbound => Color::Red,

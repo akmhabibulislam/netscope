@@ -32,6 +32,10 @@ impl NetworkCollector {
     }
 
     pub async fn collect_bandwidth_sample(&self) -> BandwidthSample {
+        self.collect_bandwidth_sample_for(None).await
+    }
+
+    pub async fn collect_bandwidth_sample_for(&self, specific_iface: Option<&str>) -> BandwidthSample {
         let interfaces = self.poll_interfaces().await;
         let mut total_rx = 0u64;
         let mut total_tx = 0u64;
@@ -40,15 +44,20 @@ impl NetworkCollector {
         let mut active_iface = None;
 
         for iface in &interfaces {
-            if iface.is_loopback {
+            if let Some(target) = specific_iface {
+                if iface.name != target {
+                    continue;
+                }
+            } else if iface.is_loopback {
                 continue;
             }
+
             total_rx += iface.stats.rx_bytes;
             total_tx += iface.stats.tx_bytes;
             total_rx_speed += iface.rx_speed_bps;
             total_tx_speed += iface.tx_speed_bps;
 
-            if iface.is_default && active_iface.is_none() {
+            if active_iface.is_none() {
                 active_iface = Some(iface.name.clone());
             }
         }
