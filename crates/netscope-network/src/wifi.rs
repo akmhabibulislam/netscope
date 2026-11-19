@@ -42,8 +42,8 @@ impl WifiScanner {
                 if parts.len() >= 3 {
                     bssid = Some(parts[2].to_string());
                 }
-            } else if trimmed.starts_with("SSID:") {
-                ssid = Some(trimmed[5..].trim().to_string());
+            } else if let Some(stripped) = trimmed.strip_prefix("SSID:") {
+                ssid = Some(stripped.trim().to_string());
             } else if trimmed.starts_with("freq:") {
                 let parts: Vec<&str> = trimmed.split_whitespace().collect();
                 if parts.len() >= 2 {

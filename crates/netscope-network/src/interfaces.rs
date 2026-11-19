@@ -200,7 +200,7 @@ impl InterfaceManager {
         if let Ok(out) = std::process::Command::new("ip").args(["-4", "-brief", "addr", "show", if_name]).output() {
             let s = String::from_utf8_lossy(&out.stdout);
             for part in s.split_whitespace() {
-                if part.contains('/') && part.chars().next().map_or(false, |c| c.is_ascii_digit()) {
+                if part.contains('/') && part.chars().next().is_some_and(|c| c.is_ascii_digit()) {
                     v4.push(part.to_string());
                 }
             }

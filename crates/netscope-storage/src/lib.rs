@@ -308,7 +308,7 @@ impl StorageManager {
     pub fn export_alerts_csv(&self) -> Result<String, anyhow::Error> {
         let alerts = self.get_recent_alerts(1000)?;
         let mut wtr = csv::Writer::from_writer(vec![]);
-        wtr.write_record(&["ID", "Timestamp", "Severity", "Title", "Message", "Rule", "Process", "Remote IP", "Remote Port", "Reviewed"])?;
+        wtr.write_record(["ID", "Timestamp", "Severity", "Title", "Message", "Rule", "Process", "Remote IP", "Remote Port", "Reviewed"])?;
         for a in alerts {
             wtr.write_record(&[
                 a.id,

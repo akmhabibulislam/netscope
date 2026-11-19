@@ -131,7 +131,7 @@ async fn main() -> Result<(), anyhow::Error> {
             }
             println!("{table}");
         }
-        Commands::Traffic { interface } => {
+        Commands::Traffic { interface: _ } => {
             println!("Monitoring live bandwidth (Ctrl+C to stop)...");
             for _ in 0..5 {
                 tokio::time::sleep(std::time::Duration::from_millis(1000)).await;

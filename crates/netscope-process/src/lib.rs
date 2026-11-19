@@ -57,9 +57,8 @@ impl ProcessResolver {
                             if let Ok(inode) = inode_str.parse::<u64>() {
                                 new_inode_to_pid.insert(inode, pid);
                             }
-                        } else if link_str.starts_with("[0000]:") {
+                        } else if let Some(inode_str) = link_str.strip_prefix("[0000]:") {
                             // Some kernels/filesystems format socket as [0000]:<inode>
-                            let inode_str = &link_str[7..];
                             if let Ok(inode) = inode_str.parse::<u64>() {
                                 new_inode_to_pid.insert(inode, pid);
                             }

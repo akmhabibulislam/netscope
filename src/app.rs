@@ -92,7 +92,7 @@ fn build_ui(app: &Application) {
     stack.add_titled(&dash_view, Some("dashboard"), "Overview");
 
     // 2. Active Connections + Inspector
-    let (conn_view, update_conn) = create_connections_page(&state, rt.clone(), &window);
+    let (conn_view, update_conn) = create_connections_page(&state, rt.clone(), window.clone());
     stack.add_titled(&conn_view, Some("connections"), "Connections");
 
     // 3. Applications Network Usage
@@ -295,7 +295,7 @@ fn create_dashboard_page(state: &AppState, rt: Arc<Runtime>) -> (GtkBox, Rc<dyn 
 fn create_connections_page(
     state: &AppState,
     rt: Arc<Runtime>,
-    parent_window: &ApplicationWindow,
+    parent_window: ApplicationWindow,
 ) -> (GtkBox, Rc<dyn Fn()>) {
     let container = GtkBox::new(Orientation::Vertical, 12);
     container.add_css_class("view-container");
@@ -380,8 +380,38 @@ fn create_connections_page(
             kill_btn.add_css_class("destructive-action");
             let local_s = format!("{}:{}", conn.local_addr, conn.local_port);
             let remote_s = format!("{}:{}", conn.remote_addr, conn.remote_port);
+            let p_win = parent_window.clone();
             kill_btn.connect_clicked(move |_| {
-                let _ = NetworkFirewall::kill_connection(&local_s, &remote_s);
+                let alert = gtk4::AlertDialog::builder()
+                    .modal(true)
+                    .message(format!("Terminate TCP Connection?\n\n{} -> {}", local_s, remote_s))
+                    .detail("This will immediately send a TCP reset (ss -K) to tear down the socket. Active transfers will be dropped.")
+                    .buttons(["Cancel", "Terminate Connection"])
+                    .cancel_button(0)
+                    .default_button(1)
+                    .build();
+
+                let loc = local_s.clone();
+                let rem = remote_s.clone();
+                let pw = p_win.clone();
+                let pw_for_err = p_win.clone();
+                alert.choose(Some(&pw), None::<&gtk4::gio::Cancellable>, move |choice| {
+                    if choice == Ok(1) {
+                        match NetworkFirewall::kill_connection(&loc, &rem) {
+                            Ok(msg) => {
+                                tracing::info!("{}", msg);
+                            }
+                            Err(e) => {
+                                let err_dialog = gtk4::AlertDialog::builder()
+                                    .modal(true)
+                                    .message("Failed to Terminate Connection")
+                                    .detail(e)
+                                    .build();
+                                err_dialog.show(Some(&pw_for_err));
+                            }
+                        }
+                    }
+                });
             });
 
             row.append(&proto_lbl);
@@ -408,7 +438,7 @@ fn create_connections_page(
 fn show_connection_inspector(parent: &ApplicationWindow, conn: &netscope_core::NetworkConnection) {
     let dialog = Window::builder()
         .transient_for(parent)
-        .title(&format!("Connection Inspector — {}:{}", conn.remote_addr, conn.remote_port))
+        .title(format!("Connection Inspector — {}:{}", conn.remote_addr, conn.remote_port))
         .modal(true)
         .default_width(520)
         .default_height(400)
@@ -559,11 +589,31 @@ fn create_packets_page(state: &AppState) -> (GtkBox, Rc<dyn Fn()>) {
     title.add_css_class("heading-1");
     top_bar.append(&title);
 
-    let info_badge = Label::new(Some("AF_PACKET / Raw Stream"));
+    let info_badge = Label::new(Some(if state.sniffer.has_raw_permission() {
+        "AF_PACKET: Hardware Stream Active"
+    } else {
+        "AF_PACKET: Restricted (CAP_NET_RAW Required)"
+    }));
     info_badge.add_css_class("badge");
-    info_badge.add_css_class("badge-info");
+    info_badge.add_css_class(if state.sniffer.has_raw_permission() {
+        "badge-success"
+    } else {
+        "badge-warning"
+    });
     top_bar.append(&info_badge);
     container.append(&top_bar);
+
+    let perm_banner = GtkBox::new(Orientation::Horizontal, 10);
+    perm_banner.add_css_class("card");
+    let perm_lbl = Label::new(Some(if state.sniffer.has_raw_permission() {
+        "Live AF_PACKET kernel socket attached. Capturing authentic hardware-level Ethernet frames, IPv4, IPv6, and TCP/UDP/ICMP payloads in real-time."
+    } else {
+        "AF_PACKET raw socket permission denied. To enable hardware-level packet capture without running as root, grant: sudo setcap cap_net_raw,cap_net_admin+eip <binary>. NetScope operates under an honest zero-simulation policy and will not generate synthetic packet data."
+    }));
+    perm_lbl.set_wrap(true);
+    perm_lbl.set_halign(gtk4::Align::Start);
+    perm_banner.append(&perm_lbl);
+    container.append(&perm_banner);
 
     let scrolled = ScrolledWindow::new();
     scrolled.set_vexpand(true);

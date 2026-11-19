@@ -104,7 +104,7 @@ impl DiagnosticsEngine {
             } else if line.contains("rtt min/avg/max/mdev") || line.contains("round-trip min/avg/max/stddev") {
                 // e.g. "rtt min/avg/max/mdev = 12.345/14.567/18.901/2.123 ms"
                 if let Some(stats_part) = line.split('=').nth(1) {
-                    let vals: Vec<&str> = stats_part.trim().split_whitespace().next().unwrap_or("").split('/').collect();
+                    let vals: Vec<&str> = stats_part.split_whitespace().next().unwrap_or("").split('/').collect();
                     if vals.len() >= 3 {
                         min_lat = vals[0].parse::<f64>().ok();
                         avg_lat = vals[1].parse::<f64>().ok();

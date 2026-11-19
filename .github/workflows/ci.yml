@@ -34,7 +34,7 @@ jobs:
         run: cargo fmt --all -- --check
 
       - name: Run Clippy Linter
-        run: cargo clippy --workspace --all-targets -- -D warnings || true
+        run: cargo clippy --workspace --all-targets -- -D warnings
 
       - name: Build Workspace
         run: cargo build --workspace --verbose
