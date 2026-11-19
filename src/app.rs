@@ -251,42 +251,58 @@ fn create_dashboard_page(state: &AppState, rt: Arc<Runtime>) -> (GtkBox, Rc<dyn 
 
     let state_clone = state.clone();
     let graph_clone = graph.clone();
+    let rt_clone = rt.clone();
 
     let update_fn: Rc<dyn Fn()> = Rc::new(move || {
         let st = state_clone.clone();
         let gr = graph_clone.clone();
+        let rt = rt_clone.clone();
 
-        let (sample, ifaces) = rt.block_on(async {
-            let s = st.collector.collect_bandwidth_sample().await;
-            let ifs = st.collector.poll_interfaces().await;
-            (s, ifs)
+        let if_val = iface_val.clone();
+        let r_val = rx_val.clone();
+        let t_val = tx_val.clone();
+        let q_val = quota_val.clone();
+        let if_det = iface_detail.clone();
+
+        let (sender, receiver) = async_channel::bounded(1);
+        std::thread::spawn(move || {
+            let res = rt.block_on(async {
+                let s = st.collector.collect_bandwidth_sample().await;
+                let ifs = st.collector.poll_interfaces().await;
+                (s, ifs, st)
+            });
+            let _ = sender.send_blocking(res);
         });
 
-        gr.push_sample(sample.rx_speed_bps, sample.tx_speed_bps);
-        let _ = st.storage.insert_bandwidth_sample(&sample);
+        glib::spawn_future_local(async move {
+            if let Ok((sample, ifaces, st)) = receiver.recv().await {
+                gr.push_sample(sample.rx_speed_bps, sample.tx_speed_bps);
+                let _ = st.storage.insert_bandwidth_sample(&sample);
 
-        let active_if = sample.active_interface.clone().unwrap_or_else(|| "lo".to_string());
-        iface_val.set_text(&active_if);
+                let active_if = sample.active_interface.clone().unwrap_or_else(|| "lo".to_string());
+                if_val.set_text(&active_if);
 
-        rx_val.set_text(&format!("{:.2} KB/s", sample.rx_speed_bps / 8000.0));
-        tx_val.set_text(&format!("{:.2} KB/s", sample.tx_speed_bps / 8000.0));
+                r_val.set_text(&format!("{:.2} KB/s", sample.rx_speed_bps / 8000.0));
+                t_val.set_text(&format!("{:.2} KB/s", sample.tx_speed_bps / 8000.0));
 
-        let used_mb = (sample.rx_bytes_total + sample.tx_bytes_total) / (1024 * 1024);
-        quota_val.set_text(&format!("{} MB / 5.0 GB", used_mb));
+                let used_mb = (sample.rx_bytes_total + sample.tx_bytes_total) / (1024 * 1024);
+                q_val.set_text(&format!("{} MB / 5.0 GB", used_mb));
 
-        if let Some(active) = ifaces.iter().find(|i| i.name == active_if) {
-            let ip_str = active.ipv4_addresses.join(", ");
-            let mac_str = active.mac_address.as_deref().unwrap_or("N/A");
-            iface_detail.set_text(&format!(
-                "IPv4: {} | MAC: {} | MTU: {} | State: {} | Total Packets Rx/Tx: {}/{}",
-                if ip_str.is_empty() { "N/A" } else { &ip_str },
-                mac_str,
-                active.mtu,
-                active.oper_state,
-                active.stats.rx_packets,
-                active.stats.tx_packets
-            ));
-        }
+                if let Some(active) = ifaces.iter().find(|i| i.name == active_if) {
+                    let ip_str = active.ipv4_addresses.join(", ");
+                    let mac_str = active.mac_address.as_deref().unwrap_or("N/A");
+                    if_det.set_text(&format!(
+                        "IPv4: {} | MAC: {} | MTU: {} | State: {} | Total Packets Rx/Tx: {}/{}",
+                        if ip_str.is_empty() { "N/A" } else { &ip_str },
+                        mac_str,
+                        active.mtu,
+                        active.oper_state,
+                        active.stats.rx_packets,
+                        active.stats.tx_packets
+                    ));
+                }
+            }
+        });
     });
 
     (container, update_fn)

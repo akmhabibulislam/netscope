@@ -5,7 +5,7 @@ pub mod custom_rule;
 pub mod sniffer;
 pub mod flow;
 
-pub use flow::{FlowKey, NetworkFlow};
+pub use flow::{CanonicalFlowKey, FlowProtocol, FlowState, FlowTracker, NetworkFlow};
 pub use sniffer::{CapturedPacketSummary, PacketDirection};
 pub use timeline::{NetworkEvent, TimelineEventType};
 pub use profile::NetworkProfile;

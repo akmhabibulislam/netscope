@@ -92,8 +92,12 @@ impl LiveTrafficSniffer {
 
     /// Synchronously attempts to start managed capture worker.
     /// Returns Ok(()) ONLY after socket creation and binding succeed.
-    /// Returns Err(String) immediately if permissions or socket setup fail.
+    /// If an interface name is specified, properly resolves its ifindex and binds with sockaddr_ll!
     pub fn start_capture(&self) -> Result<(), String> {
+        self.start_capture_on(None)
+    }
+
+    pub fn start_capture_on(&self, interface: Option<&str>) -> Result<(), String> {
         let mut state_guard = self.state.lock().map_err(|e| e.to_string())?;
         if *state_guard == CaptureState::Running || *state_guard == CaptureState::Starting {
             return Ok(()); // Already running
@@ -130,19 +134,58 @@ impl LiveTrafficSniffer {
             *p = true;
         }
 
+        // 2. Interface Binding: if an interface is specified, bind directly using libc::sockaddr_ll
+        if let Some(if_name) = interface {
+            let c_ifname = std::ffi::CString::new(if_name).map_err(|e| e.to_string())?;
+            let ifindex = unsafe { libc::if_nametoindex(c_ifname.as_ptr()) };
+            if ifindex == 0 {
+                unsafe { libc::close(socket_fd) };
+                let err_msg = format!("Interface '{}' not found or invalid ifindex", if_name);
+                *state_guard = CaptureState::Failed;
+                return Err(err_msg);
+            }
+
+            let mut bind_addr: libc::sockaddr_ll = unsafe { std::mem::zeroed() };
+            bind_addr.sll_family = libc::AF_PACKET as u16;
+            bind_addr.sll_protocol = (libc::ETH_P_ALL as u16).to_be();
+            bind_addr.sll_ifindex = ifindex as i32;
+
+            let bind_res = unsafe {
+                libc::bind(
+                    socket_fd,
+                    &bind_addr as *const _ as *const libc::sockaddr,
+                    std::mem::size_of::<libc::sockaddr_ll>() as libc::socklen_t,
+                )
+            };
+
+            if bind_res < 0 {
+                unsafe { libc::close(socket_fd) };
+                let err_msg = format!("Failed to bind AF_PACKET to interface '{}' (errno: {})", if_name, unsafe { *libc::__errno_location() });
+                *state_guard = CaptureState::Failed;
+                return Err(err_msg);
+            }
+            info!("Bound live packet socket to interface '{}' (ifindex: {})", if_name, ifindex);
+        }
+
         // Configure socket timeout: 250ms
         let tv = libc::timeval {
             tv_sec: 0,
             tv_usec: 250_000,
         };
-        unsafe {
+        let sockopt_res = unsafe {
             libc::setsockopt(
                 socket_fd,
                 libc::SOL_SOCKET,
                 libc::SO_RCVTIMEO,
                 &tv as *const _ as *const libc::c_void,
                 std::mem::size_of::<libc::timeval>() as u32,
-            );
+            )
+        };
+        if sockopt_res < 0 {
+            unsafe { libc::close(socket_fd) };
+            let err_msg = "Failed to configure SO_RCVTIMEO on packet socket".to_string();
+            *state_guard = CaptureState::Failed;
+            return Err(err_msg);
         }
 
         let (stop_tx, stop_rx) = mpsc::channel::<()>();
