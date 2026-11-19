@@ -1,30 +1,24 @@
 # Maintainer: NetScope Contributors <dev@netscope.internal>
 pkgname=netscope
-pkgver=0.1.0
+pkgver=0.2.0
 pkgrel=1
-pkgdesc="A professional, cross-distribution Linux network intelligence application"
+pkgdesc="A professional, cross-distribution Linux network intelligence and packet monitoring desktop application"
 arch=('x86_64')
 url="https://github.com/netscope/netscope"
 license=('MIT' 'Apache-2.0')
-depends=('gtk4' 'libadwaita' 'sqlite' 'iproute2')
-makedepends=('cargo' 'rust' 'pkgconf')
-source=("$pkgname-$pkgver.tar.gz::$url/archive/v$pkgver.tar.gz")
-sha256sums=('SKIP')
-
-build() {
-    cd "$pkgname-$pkgver"
-    cargo build --release --locked --workspace
-}
-
-check() {
-    cd "$pkgname-$pkgver"
-    cargo test --release --locked --workspace
-}
+depends=('gtk4' 'libadwaita' 'sqlite' 'iproute2' 'libcap')
+options=('!strip' '!debug')
+source=()
 
 package() {
-    cd "$pkgname-$pkgver"
+    cd "$startdir/../.."
     install -Dm755 "target/release/netscope" "$pkgdir/usr/bin/netscope-gui"
-    install -Dm755 "target/release/netscope" "$pkgdir/usr/bin/netscope"
+    ln -sf "netscope-gui" "$pkgdir/usr/bin/netscope"
+
+    if [ -f "target/release/netscope-cli" ]; then
+        install -Dm755 "target/release/netscope-cli" "$pkgdir/usr/bin/netscope-cli"
+    fi
+
     install -Dm644 "resources/netscope.desktop" "$pkgdir/usr/share/applications/netscope.desktop"
     install -Dm644 "resources/icons/netscope.svg" "$pkgdir/usr/share/icons/hicolor/scalable/apps/netscope.svg"
     install -Dm644 "README.md" "$pkgdir/usr/share/doc/$pkgname/README.md"

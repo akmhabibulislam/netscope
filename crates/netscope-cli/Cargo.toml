@@ -7,7 +7,7 @@ license.workspace = true
 description = "NetScope Command Line Interface companion"
 
 [[bin]]
-name = "netscope"
+name = "netscope-cli"
 path = "src/main.rs"
 
 [dependencies]
