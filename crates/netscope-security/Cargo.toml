@@ -16,3 +16,4 @@ thiserror = "1.0"
 anyhow = "1.0"
 ipnetwork = "0.20"
 directories = "5.0"
+reqwest = { version = "0.12", features = ["json"] }

@@ -1,9 +1,11 @@
 pub mod threat_intel;
+pub mod pipeline;
 
 use chrono::Utc;
 use netscope_core::{AlertSeverity, BandwidthSample, ConnectionState, NetworkConnection, SecurityAlert};
 use std::collections::{HashMap, HashSet};
 use std::net::IpAddr;
+pub use pipeline::{FeedProvider, ThreatIndicator, ThreatPipeline};
 pub use threat_intel::ThreatIntel;
 
 pub struct SecurityRuleEngine {
