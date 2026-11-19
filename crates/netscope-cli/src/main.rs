@@ -2,7 +2,7 @@ use clap::{Parser, Subcommand};
 use comfy_table::{presets::UTF8_FULL, Cell, Color, Table};
 use netscope_core::Protocol;
 use netscope_dns::DnsInspector;
-use netscope_network::{collector::NetworkCollector, diagnostics::DiagnosticsEngine};
+use netscope_network::{collector::NetworkCollector, diagnostics::DiagnosticsEngine, firewall::NetworkFirewall, wifi::WifiScanner};
 use netscope_security::SecurityRuleEngine;
 use netscope_storage::StorageManager;
 
@@ -55,6 +55,15 @@ enum Commands {
     },
     /// Show recent security alerts
     Alerts,
+    /// Inspect Wi-Fi link parameters and RF signal
+    Wifi,
+    /// Terminate an active TCP connection (requires privileges)
+    Kill {
+        #[arg(short, long)]
+        src: String,
+        #[arg(short, long)]
+        dst: String,
+    },
     /// Export historical data
     Export {
         #[arg(short, long, default_value = "csv")]
@@ -256,6 +265,36 @@ async fn main() -> Result<(), anyhow::Error> {
                 ]);
             }
             println!("{table}");
+        }
+        Commands::Wifi => {
+            let ifaces = collector.poll_interfaces().await;
+            let wifi_iface = ifaces.iter().find(|i| i.if_type == netscope_core::InterfaceType::WiFi || i.name.starts_with("wl"));
+            if let Some(iface) = wifi_iface {
+                if let Some(details) = WifiScanner::get_wifi_details(&iface.name) {
+                    let mut table = Table::new();
+                    table.load_preset(UTF8_FULL);
+                    table.set_header(vec!["Parameter", "Value"]);
+                    table.add_row(vec!["Interface", &details.interface]);
+                    table.add_row(vec!["SSID", &details.ssid.unwrap_or_else(|| "N/A".to_string())]);
+                    table.add_row(vec!["BSSID", &details.bssid.unwrap_or_else(|| "N/A".to_string())]);
+                    table.add_row(vec!["Signal RSSI", &format!("{} dBm", details.signal_dbm.map(|s| s.to_string()).unwrap_or_else(|| "-".to_string()))]);
+                    table.add_row(vec!["Link Quality", &details.link_quality.unwrap_or_else(|| "-".to_string())]);
+                    table.add_row(vec!["Frequency", &format!("{:.3} GHz", details.frequency_ghz.unwrap_or(0.0))]);
+                    table.add_row(vec!["Bitrate", &format!("{:.1} Mbps", details.tx_bitrate_mbps.unwrap_or(0.0))]);
+                    println!("{table}");
+                } else {
+                    println!("Wi-Fi interface {} is not connected or unassociated", iface.name);
+                }
+            } else {
+                println!("No Wi-Fi interface detected on this machine");
+            }
+        }
+        Commands::Kill { src, dst } => {
+            println!("Attempting socket drop for {} -> {}...", src, dst);
+            match NetworkFirewall::kill_connection(&src, &dst) {
+                Ok(msg) => println!("{}", msg),
+                Err(e) => println!("Drop failed: {}", e),
+            }
         }
         Commands::Export { format } => {
             let storage = StorageManager::new(None)?;

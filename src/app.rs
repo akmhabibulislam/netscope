@@ -6,8 +6,11 @@ use netscope_core::Protocol;
 use netscope_dns::DnsInspector;
 use netscope_network::collector::NetworkCollector;
 use netscope_network::diagnostics::DiagnosticsEngine;
+use netscope_network::firewall::NetworkFirewall;
+use netscope_network::wifi::WifiScanner;
 use netscope_security::SecurityRuleEngine;
 use netscope_storage::StorageManager;
+use crate::graph::BandwidthGraph;
 use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -91,6 +94,10 @@ fn build_ui(app: &Application) {
     let diag_view = create_diagnostics_page(rt.clone());
     stack.add_titled(&diag_view, Some("diagnostics"), "Diagnostics");
 
+    // 5.5 Wi-Fi Intelligence View
+    let (wifi_view, update_wifi) = create_wifi_page(&collector, rt.clone());
+    stack.add_titled(&wifi_view, Some("wifi"), "Wi-Fi & RF");
+
     // 6. Security View
     let (sec_view, update_sec) = create_security_page(&collector, rule_engine.clone(), &storage, rt.clone());
     stack.add_titled(&sec_view, Some("security"), "Security & Alerts");
@@ -111,6 +118,7 @@ fn build_ui(app: &Application) {
     update_conn();
     update_proc();
     update_dns();
+    update_wifi();
     update_sec();
 
     // Periodic timer (1.5 seconds) for real-time monitoring
@@ -175,6 +183,10 @@ fn create_dashboard_page(
     grid_box.append(&total_card);
     container.append(&grid_box);
 
+    // Live Bandwidth Graph
+    let graph = BandwidthGraph::new();
+    container.append(graph.widget());
+
     // Interface Details Card
     let iface_details_box = GtkBox::new(Orientation::Vertical, 8);
     iface_details_box.add_css_class("card");
@@ -201,16 +213,19 @@ fn create_dashboard_page(
 
     let col_clone = collector.clone();
     let storage_clone = storage.clone();
+    let graph_clone = graph.clone();
 
     let update_fn: Rc<dyn Fn()> = Rc::new(move || {
         let col = col_clone.clone();
         let st = storage_clone.clone();
+        let gr = graph_clone.clone();
         let (sample, ifaces) = rt.block_on(async {
             let s = col.collect_bandwidth_sample().await;
             let ifs = col.poll_interfaces().await;
             (s, ifs)
         });
 
+        gr.push_sample(sample.rx_speed_bps, sample.tx_speed_bps);
         let _ = st.insert_bandwidth_sample(&sample);
 
         let if_name = sample.active_interface.clone().unwrap_or_else(|| "lo".to_string());
@@ -331,6 +346,15 @@ fn create_connections_page(
             row.append(&remote_lbl);
             row.append(&state_lbl);
             row.append(&proc_lbl);
+
+            let kill_btn = Button::with_label("Drop");
+            kill_btn.add_css_class("badge-danger");
+            let local_s = format!("{}:{}", conn.local_addr, conn.local_port);
+            let remote_s = format!("{}:{}", conn.remote_addr, conn.remote_port);
+            kill_btn.connect_clicked(move |_| {
+                let _ = NetworkFirewall::kill_connection(&local_s, &remote_s);
+            });
+            row.append(&kill_btn);
 
             list_clone.append(&row);
         }
@@ -615,6 +639,74 @@ fn create_diagnostics_page(rt: Arc<Runtime>) -> GtkBox {
     });
 
     container
+}
+
+fn create_wifi_page(
+    collector: &NetworkCollector,
+    rt: Arc<Runtime>,
+) -> (GtkBox, Rc<dyn Fn()>) {
+    let container = GtkBox::new(Orientation::Vertical, 16);
+    container.add_css_class("view-container");
+
+    let title = Label::new(Some("Wi-Fi & Wireless RF Intelligence"));
+    title.add_css_class("title-1");
+    container.append(&title);
+
+    let info_card = GtkBox::new(Orientation::Vertical, 12);
+    info_card.add_css_class("card");
+
+    let ssid_lbl = Label::new(Some("SSID: Scanning..."));
+    ssid_lbl.add_css_class("heading");
+    ssid_lbl.set_halign(gtk4::Align::Start);
+
+    let bssid_lbl = Label::new(Some("BSSID / Access Point: -"));
+    bssid_lbl.set_halign(gtk4::Align::Start);
+
+    let signal_lbl = Label::new(Some("Signal RSSI: - dBm"));
+    signal_lbl.set_halign(gtk4::Align::Start);
+    signal_lbl.add_css_class("accent-green");
+
+    let quality_lbl = Label::new(Some("Link Quality: -"));
+    quality_lbl.set_halign(gtk4::Align::Start);
+
+    let freq_lbl = Label::new(Some("Frequency: - GHz | Bitrate: - Mbps"));
+    freq_lbl.set_halign(gtk4::Align::Start);
+
+    info_card.append(&ssid_lbl);
+    info_card.append(&bssid_lbl);
+    info_card.append(&signal_lbl);
+    info_card.append(&quality_lbl);
+    info_card.append(&freq_lbl);
+    container.append(&info_card);
+
+    let col_clone = collector.clone();
+    let update_fn: Rc<dyn Fn()> = Rc::new(move || {
+        let col = col_clone.clone();
+        let ifaces = rt.block_on(async { col.poll_interfaces().await });
+        let wifi_iface = ifaces.iter().find(|i| i.if_type == netscope_core::InterfaceType::WiFi || i.name.starts_with("wl"));
+
+        if let Some(iface) = wifi_iface {
+            if let Some(details) = WifiScanner::get_wifi_details(&iface.name) {
+                ssid_lbl.set_text(&format!("SSID: {}", details.ssid.unwrap_or_else(|| "Connected".to_string())));
+                bssid_lbl.set_text(&format!("BSSID / Access Point: {}", details.bssid.unwrap_or_else(|| "N/A".to_string())));
+                signal_lbl.set_text(&format!("Signal RSSI: {} dBm", details.signal_dbm.map(|s| s.to_string()).unwrap_or_else(|| "-".to_string())));
+                quality_lbl.set_text(&format!("Link Quality: {}", details.link_quality.unwrap_or_else(|| "-".to_string())));
+                freq_lbl.set_text(&format!(
+                    "Frequency: {:.3} GHz | TX Bitrate: {:.1} Mbps",
+                    details.frequency_ghz.unwrap_or(0.0),
+                    details.tx_bitrate_mbps.unwrap_or(0.0)
+                ));
+            } else {
+                ssid_lbl.set_text(&format!("Wi-Fi Interface ({}) Detected", iface.name));
+                bssid_lbl.set_text("Status: Idle or Not Associated");
+            }
+        } else {
+            ssid_lbl.set_text("No active Wi-Fi interface detected on this machine");
+            bssid_lbl.set_text("Interface: None");
+        }
+    });
+
+    (container, update_fn)
 }
 
 fn create_security_page(

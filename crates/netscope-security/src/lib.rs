@@ -1,7 +1,10 @@
+pub mod threat_intel;
+
 use chrono::Utc;
 use netscope_core::{AlertSeverity, BandwidthSample, ConnectionState, NetworkConnection, SecurityAlert};
 use std::collections::{HashMap, HashSet};
 use std::net::IpAddr;
+pub use threat_intel::ThreatIntel;
 
 pub struct SecurityRuleEngine {
     whitelisted_ips: HashSet<String>,
@@ -9,6 +12,7 @@ pub struct SecurityRuleEngine {
     seen_processes: HashSet<String>,
     process_connection_counts: HashMap<String, usize>,
     last_bandwidth_rx_speed: f64,
+    threat_intel: ThreatIntel,
 }
 
 impl SecurityRuleEngine {
@@ -19,6 +23,7 @@ impl SecurityRuleEngine {
             seen_processes: HashSet::new(),
             process_connection_counts: HashMap::new(),
             last_bandwidth_rx_speed: 0.0,
+            threat_intel: ThreatIntel::new(),
         }
     }
 
@@ -39,6 +44,27 @@ impl SecurityRuleEngine {
             // Whitelist skip
             if self.whitelisted_ips.contains(&remote_ip_str) || self.whitelisted_processes.contains(&proc_name) {
                 continue;
+            }
+
+            // Rule 0: Offline Threat Intelligence (IoC match)
+            if let Some(matched) = self.threat_intel.check_ip(conn.remote_addr) {
+                alerts.push(SecurityAlert {
+                    id: format!("ALERT-THREAT-{}", conn.id),
+                    timestamp: now,
+                    severity: AlertSeverity::Critical,
+                    title: format!("Known Threat Detected: {}", matched.threat_type),
+                    message: format!("Process '{}' connected to {}: {}. (Source: {})", proc_name, matched.ip, matched.description, matched.source),
+                    rule_id: "RULE_THREAT_INTEL".to_string(),
+                    affected_process: Some(proc_name.clone()),
+                    remote_ip: Some(conn.remote_addr),
+                    remote_port: Some(conn.remote_port),
+                    recommendations: vec![
+                        "Terminate connection immediately using NetScope Firewall".to_string(),
+                        "Quarantine affected binary".to_string(),
+                        "Scan host filesystem".to_string(),
+                    ],
+                    reviewed: false,
+                });
             }
 
             // Rule 1: Unexpected Listening Ports on public interfaces (0.0.0.0 or ::)
