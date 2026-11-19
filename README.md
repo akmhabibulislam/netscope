@@ -1,41 +1,41 @@
-# NetScope — Linux Network Intelligence Application
+# 🌐 NetScope — Linux Network Intelligence Application
 
-[![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](LICENSE)
-[![Rust](https://img.shields.io/badge/rust-stable-brightgreen.svg)](https://www.rust-lang.org/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![Rust](https://img.shields.io/badge/Rust-2024%20Stable-brightgreen.svg)](https://www.rust-lang.org/)
 [![GUI](https://img.shields.io/badge/GUI-GTK4%20%2F%20Libadwaita-purple.svg)](https://gtk.org/)
-[![Platform](https://img.shields.io/badge/platform-Linux-orange.svg)](https://kernel.org/)
-[![Status](https://img.shields.io/badge/build-passing-success.svg)]()
+[![Platform](https://img.shields.io/badge/Platform-Linux-orange.svg)](https://kernel.org/)
+[![Status](https://img.shields.io/badge/Build-Passing-success.svg)]()
 
 **NetScope** is a high-performance, cross-distribution Linux network intelligence, live packet sniffer, and threat detection desktop application written in **Rust**, **GTK4**, and **Libadwaita**. It provides deep, real-time visibility into all inbound and outbound network data streams, active sockets, per-process socket attribution, wireless RF metrics, system DNS resolution, and anomalous activity—designed with **privacy-by-default** principles and requiring no mandatory root access.
 
 ---
 
-## Key Features & Capabilities
+## ✨ Key Features & Capabilities
 
-### 1. Live Inbound & Outbound Packet Sniffer
-- **Complete In/Out Data Inspection**: Real-time packet capture stream showing every packet entering and leaving your system.
-- **Directional Tagging**: Distinguishes `INBOUND` from `OUTBOUND` traffic with colored badges.
+### 📡 1. Live Inbound & Outbound Packet Sniffer
+- **Complete Data Stream Inspection**: Real-time packet capture stream detailing traffic entering and leaving your system.
+- **Directional Tagging**: Clearly distinguishes `INBOUND` from `OUTBOUND` traffic with dedicated badges.
 - **Protocol & Payload Dissection**: Identifies TCP, UDP, ICMP, DNS queries, and TLS/HTTPS application payloads with byte-exact length counters.
-- **Dual-Engine Architecture**: Uses Linux kernel `AF_PACKET` raw sockets when available, with automatic unprivileged fallback to high-frequency socket observing.
+- **Dual-Engine Architecture**: Employs Linux kernel `AF_PACKET` raw sockets when available, with automatic unprivileged fallback to high-frequency socket observing.
 
-### 2. Animated Bandwidth Waveform Graph
+### 📈 2. Animated Bandwidth Waveform Graph
 - Embedded, GPU-accelerated **Cairo canvas graph** directly on the Dashboard.
-- **Dual-channel spline waveforms**: Download (RX) and Upload (TX) curves over a 60-second rolling window.
+- **Dual-channel spline waveforms**: Smooth Download (RX) and Upload (TX) curves over a 60-second rolling window.
 - Real-time adaptive peak-scaling and throughput metric overlays.
 
-### 3. Connection Forensics & Socket Termination
+### 🔍 3. Connection Forensics & Socket Termination
 - **Deep Connection Inspection**: Detailed view showing socket state, PID attribution, binary path, address family, and protocol.
 - **1-Click Socket Drop**: Terminate unwanted or rogue TCP sockets directly from the GUI or CLI via Linux `ss -K`.
 - **IP Firewall Blocking**: Integrated Linux netfilter interface to blackhole suspicious destinations.
 
-### 4. Wi-Fi & Wireless RF Spectrum Analyzer
+### 📶 4. Wi-Fi & Wireless RF Spectrum Analyzer
 - Dedicated wireless tab displaying real-time metrics for associated wireless interfaces (`wlan0`):
   - **Connected SSID** & **BSSID / Access Point MAC**
   - **Signal RSSI (dBm)** with percentage Link Quality estimation
   - **Channel Frequency (GHz)**: 2.4 GHz, 5 GHz, or 6 GHz Wi-Fi 6E/7
   - **Transmit Bitrate (Mbps)**
 
-### 5. Anomaly Detection & Offline Threat Intelligence
+### 🛡️ 5. Anomaly Detection & Offline Threat Intelligence
 - **Offline IoC Matching**: Automatically cross-references remote IP addresses against local, privacy-preserving threat intelligence feeds (known C2 nodes, Tor exit relays) without sending telemetry to external parties.
 - **Behavioral Security Heuristics**:
   - Flags unexpected listening sockets on public addresses (reverse shell ports like 4444, 23, 31337).
@@ -43,11 +43,11 @@
   - High-frequency socket opening by single binaries.
   - Reserved / documentation address routing anomalies.
 
-### 6. Per-Process Network Attribution
+### ⚙️ 6. Per-Process Network Attribution
 - Resolves open sockets to executing Linux processes, PIDs, and binaries via `/proc/<pid>/fd/` socket inode linking.
 - Aggregates sockets by process name, showing open socket counts, protocols, and executable paths.
 
-### 7. Diagnostics, Speedtest & DNS History
+### 🧪 7. Diagnostics, Speedtest & DNS History
 - Built-in multi-threaded HTTP latency and download throughput benchmark.
 - Multi-record DNS querying (A, AAAA, MX, TXT) with millisecond-resolution response timing.
 - Ping latency (min/avg/max) and packet loss tester.
@@ -55,11 +55,11 @@
 
 ---
 
-## Installation Tutorial
+## 📦 Installation Tutorial
 
 NetScope can be installed using pre-built distribution packages, the native desktop installer script, or built directly from source.
 
-### Method 1: Arch Linux / CachyOS / EndeavourOS / Manjaro (`pacman`)
+### 🐧 Method 1: Arch Linux / CachyOS / EndeavourOS / Manjaro (`pacman`)
 
 If you are on an Arch-based distribution, install the ready-to-use pacman package:
 
@@ -83,13 +83,13 @@ This installs:
 
 ---
 
-### Method 2: Universal Desktop Installer Script (`install.sh`)
+### 💻 Method 2: Universal Desktop Installer Script (`install.sh`)
 
 NetScope includes an installer script that installs the binaries, desktop menu entry, and icon for your current user without needing root privileges.
 
 ```bash
 # Clone the repository
-git clone https://github.com/netscope/netscope.git
+git clone https://github.com/akmhabibulislam/netscope.git
 cd netscope
 
 # Build release binaries
@@ -106,7 +106,7 @@ sudo PREFIX=/usr/local ./install.sh
 
 ---
 
-### Method 3: Building from Source
+### 🛠️ Method 3: Building from Source
 
 #### Step 1: Install System Build Dependencies
 
@@ -135,7 +135,7 @@ Compiled binaries will be available in `target/release/`:
 
 ---
 
-### Optional: Packet Sniffer Raw Sockets Capability
+### 🔐 Optional: Packet Sniffer Raw Sockets Capability
 
 NetScope functions completely out-of-the-box without root privileges. To enable kernel-level raw packet sniffing (`AF_PACKET`) without running the app as `root`, grant `cap_net_raw` and `cap_net_admin` to the binary:
 
@@ -147,7 +147,7 @@ sudo setcap cap_net_raw,cap_net_admin+eip ~/.local/bin/netscope-gui
 
 ---
 
-## Running NetScope
+## 🚀 Running NetScope
 
 ### Desktop GUI
 Launch the graphical interface from your application launcher (App Menu / GNOME / KDE / Rofi / Wofi) or run:
@@ -200,7 +200,7 @@ netscope-cli export --format csv
 
 ---
 
-## Architecture
+## 🏛️ Architecture
 
 NetScope is structured into decoupled, maintainable Rust crates:
 
@@ -226,7 +226,7 @@ netscope/
 
 ---
 
-## Security & Privacy Model
+## 🔒 Security & Privacy Model
 
 1. **Strictly Local-First**: No background telemetry, metrics, or diagnostic data is ever transmitted over the network.
 2. **Offline Threat Intel**: IoC checking uses local lists rather than querying external APIs with your network destinations.
@@ -235,7 +235,7 @@ netscope/
 
 ---
 
-## Testing
+## 🧪 Testing
 
 Run the automated test suite across all workspace crates:
 
@@ -245,10 +245,6 @@ cargo test --workspace
 
 ---
 
-## License
+## 📜 License
 
-Dual-licensed under either of:
-- [Apache License, Version 2.0](LICENSE-APACHE)
-- [MIT License](LICENSE-MIT)
-
-at your option.
+Distributed under the [MIT License](LICENSE).
