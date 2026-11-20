@@ -1,7 +1,10 @@
 use chrono::Utc;
-use netscope_core::{CapturedPacketSummary, PacketDirection};
+use netscope_core::{
+    CapturedPacketSummary, FlowProtocol, FlowTracker, NetworkFlow, PacketDirection,
+};
 use std::collections::VecDeque;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+use std::str::FromStr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread::JoinHandle;
@@ -34,6 +37,7 @@ pub struct LiveTrafficSniffer {
     last_error: Arc<Mutex<Option<String>>>,
     packet_counter: Arc<AtomicU64>,
     captured_packets: Arc<Mutex<VecDeque<CapturedPacketSummary>>>,
+    flow_tracker: Arc<Mutex<FlowTracker>>,
     local_ips: Arc<Mutex<Vec<IpAddr>>>,
     worker_handle: Arc<Mutex<Option<JoinHandle<()>>>>,
     stop_signal: Arc<Mutex<Option<mpsc::Sender<()>>>>,
@@ -47,6 +51,7 @@ impl Clone for LiveTrafficSniffer {
             last_error: self.last_error.clone(),
             packet_counter: self.packet_counter.clone(),
             captured_packets: self.captured_packets.clone(),
+            flow_tracker: self.flow_tracker.clone(),
             local_ips: self.local_ips.clone(),
             worker_handle: self.worker_handle.clone(),
             stop_signal: self.stop_signal.clone(),
@@ -62,6 +67,7 @@ impl LiveTrafficSniffer {
             last_error: Arc::new(Mutex::new(None)),
             packet_counter: Arc::new(AtomicU64::new(0)),
             captured_packets: Arc::new(Mutex::new(VecDeque::with_capacity(5000))),
+            flow_tracker: Arc::new(Mutex::new(FlowTracker::new(10000))),
             local_ips: Arc::new(Mutex::new(Vec::new())),
             worker_handle: Arc::new(Mutex::new(None)),
             stop_signal: Arc::new(Mutex::new(None)),
@@ -75,7 +81,10 @@ impl LiveTrafficSniffer {
     }
 
     pub fn state(&self) -> CaptureState {
-        self.state.lock().map(|s| *s).unwrap_or(CaptureState::Stopped)
+        self.state
+            .lock()
+            .map(|s| *s)
+            .unwrap_or(CaptureState::Stopped)
     }
 
     pub fn is_running(&self) -> bool {
@@ -118,7 +127,9 @@ impl LiveTrafficSniffer {
         };
 
         if socket_fd < 0 {
-            let err_msg = "AF_PACKET raw socket permission denied: CAP_NET_RAW capability required.".to_string();
+            let err_msg =
+                "AF_PACKET raw socket permission denied: CAP_NET_RAW capability required."
+                    .to_string();
             if let Ok(mut p) = self.has_raw_permission.lock() {
                 *p = false;
             }
@@ -160,11 +171,18 @@ impl LiveTrafficSniffer {
 
             if bind_res < 0 {
                 unsafe { libc::close(socket_fd) };
-                let err_msg = format!("Failed to bind AF_PACKET to interface '{}' (errno: {})", if_name, unsafe { *libc::__errno_location() });
+                let err_msg = format!(
+                    "Failed to bind AF_PACKET to interface '{}' (errno: {})",
+                    if_name,
+                    unsafe { *libc::__errno_location() }
+                );
                 *state_guard = CaptureState::Failed;
                 return Err(err_msg);
             }
-            info!("Bound live packet socket to interface '{}' (ifindex: {})", if_name, ifindex);
+            info!(
+                "Bound live packet socket to interface '{}' (ifindex: {})",
+                if_name, ifindex
+            );
         }
 
         // Configure socket timeout: 250ms
@@ -196,6 +214,7 @@ impl LiveTrafficSniffer {
         let state_arc = self.state.clone();
         let counter_arc = self.packet_counter.clone();
         let buffer_arc = self.captured_packets.clone();
+        let flow_tracker_arc = self.flow_tracker.clone();
         let local_ips_arc = self.local_ips.clone();
 
         *state_guard = CaptureState::Running;
@@ -241,6 +260,32 @@ impl LiveTrafficSniffer {
                         &counter_arc,
                         &local_ips_arc,
                     ) {
+                        // Ingest into flow tracker if IP endpoints are present
+                        if let (Ok(src_ip), Ok(dst_ip)) = (
+                            std::net::IpAddr::from_str(&packet.src_addr),
+                            std::net::IpAddr::from_str(&packet.dst_addr),
+                        ) {
+                            let proto = match packet.protocol.as_str() {
+                                "TCP" => FlowProtocol::Tcp,
+                                "UDP" => FlowProtocol::Udp,
+                                "ICMP" | "ICMPv6" => FlowProtocol::Icmp,
+                                _ => FlowProtocol::Other(0),
+                            };
+                            let sp = packet.src_port.unwrap_or(0);
+                            let dp = packet.dst_port.unwrap_or(0);
+                            if let Ok(mut tracker) = flow_tracker_arc.lock() {
+                                tracker.process_packet(
+                                    src_ip,
+                                    sp,
+                                    dst_ip,
+                                    dp,
+                                    proto,
+                                    packet.length_bytes,
+                                    None,
+                                );
+                            }
+                        }
+
                         if let Ok(mut q) = buffer_arc.lock() {
                             if q.len() >= 5000 {
                                 q.pop_front();
@@ -299,6 +344,15 @@ impl LiveTrafficSniffer {
         }
     }
 
+    pub fn get_active_flows(&self) -> Vec<NetworkFlow> {
+        if let Ok(mut tracker) = self.flow_tracker.lock() {
+            tracker.cleanup_expired();
+            tracker.active_flows()
+        } else {
+            Vec::new()
+        }
+    }
+
     /// Comprehensive Ethernet frame parser supporting VLAN tags (802.1Q), IPv4 (with fragment offset check),
     /// IPv6 (with full Extension Header traversal), and Linux kernel sll_pkttype directional metadata.
     pub fn parse_ethernet_frame(
@@ -333,9 +387,21 @@ impl LiveTrafficSniffer {
 
         match ether_type {
             // IPv4 Frame
-            0x0800 => Self::parse_ipv4(&bytes[offset..], bytes.len(), sll_pkttype, counter, local_ips_arc),
+            0x0800 => Self::parse_ipv4(
+                &bytes[offset..],
+                bytes.len(),
+                sll_pkttype,
+                counter,
+                local_ips_arc,
+            ),
             // IPv6 Frame
-            0x86DD => Self::parse_ipv6(&bytes[offset..], bytes.len(), sll_pkttype, counter, local_ips_arc),
+            0x86DD => Self::parse_ipv6(
+                &bytes[offset..],
+                bytes.len(),
+                sll_pkttype,
+                counter,
+                local_ips_arc,
+            ),
             // ARP (0x0806)
             0x0806 => Self::parse_arp(&bytes[offset..], bytes.len(), counter),
             _ => None,
@@ -372,7 +438,10 @@ impl LiveTrafficSniffer {
             dst_addr: dst_ip.to_string(),
             dst_port: None,
             length_bytes: total_frame_len,
-            summary: format!("{} (Who has {}? Tell {}) [{} bytes]", op_name, dst_ip, src_ip, total_frame_len),
+            summary: format!(
+                "{} (Who has {}? Tell {}) [{} bytes]",
+                op_name, dst_ip, src_ip, total_frame_len
+            ),
         })
     }
 
@@ -415,12 +484,7 @@ impl LiveTrafficSniffer {
         let payload = &ip_bytes[ihl..total_length];
 
         let (src_port, dst_port, proto_name, app_info) = if is_non_initial_fragment {
-            (
-                None,
-                None,
-                "IPv4-Frag",
-                "IPv4 Non-Initial Fragment",
-            )
+            (None, None, "IPv4-Frag", "IPv4 Non-Initial Fragment")
         } else {
             match protocol_num {
                 6 => {
@@ -495,7 +559,12 @@ impl LiveTrafficSniffer {
                     };
                     (None, None, "ICMP", desc)
                 }
-                50 => (None, None, "ESP", "IPsec Encapsulated Security Payload (Encrypted)"),
+                50 => (
+                    None,
+                    None,
+                    "ESP",
+                    "IPsec Encapsulated Security Payload (Encrypted)",
+                ),
                 51 => (None, None, "AH", "IPsec Authentication Header"),
                 _ => (None, None, "IPv4", "Raw IPv4 Protocol"),
             }
@@ -503,7 +572,7 @@ impl LiveTrafficSniffer {
 
         // Direction classification: prioritize Linux kernel sll_pkttype
         let is_outbound = match sll_pkttype {
-            4 => true,  // PACKET_OUTGOING
+            4 => true,      // PACKET_OUTGOING
             0..=3 => false, // PACKET_HOST, BROADCAST, MULTICAST, OTHERHOST
             _ => {
                 // Fallback to verified local interface IP matching
@@ -596,7 +665,8 @@ impl LiveTrafficSniffer {
                         break;
                     }
                     next_header = ip_bytes[offset];
-                    let frag_offset = u16::from_be_bytes([ip_bytes[offset + 2], ip_bytes[offset + 3]]) >> 3;
+                    let frag_offset =
+                        u16::from_be_bytes([ip_bytes[offset + 2], ip_bytes[offset + 3]]) >> 3;
                     if frag_offset > 0 {
                         is_non_initial_fragment = true;
                     }
@@ -625,12 +695,7 @@ impl LiveTrafficSniffer {
         };
 
         let (src_port, dst_port, proto_name, app_info) = if is_non_initial_fragment {
-            (
-                None,
-                None,
-                "IPv6-Frag",
-                "IPv6 Fragment Continuation",
-            )
+            (None, None, "IPv6-Frag", "IPv6 Fragment Continuation")
         } else {
             match next_header {
                 6 => {
@@ -670,7 +735,12 @@ impl LiveTrafficSniffer {
                     }
                 }
                 58 => (None, None, "ICMPv6", "ICMPv6 Control"),
-                50 => (None, None, "ESP", "IPsec Encapsulated Security Payload (Encrypted)"),
+                50 => (
+                    None,
+                    None,
+                    "ESP",
+                    "IPsec Encapsulated Security Payload (Encrypted)",
+                ),
                 51 => (None, None, "AH", "IPsec Authentication Header"),
                 _ => (None, None, "IPv6", "IPv6 NextHeader"),
             }
@@ -735,7 +805,7 @@ mod tests {
         frame[13] = 0x06; // EtherType = ARP
         frame[14 + 6] = 0x00;
         frame[14 + 7] = 0x01; // Opcode = 1 (Request)
-        // Sender IP: 192.168.1.1
+                              // Sender IP: 192.168.1.1
         frame[14 + 14] = 192;
         frame[14 + 15] = 168;
         frame[14 + 16] = 1;
@@ -763,8 +833,8 @@ mod tests {
         frame[13] = 0x00;
         frame[14] = 0x45; // IPv4, IHL 5
         frame[16] = 0x00;
-        frame[17] = 40;   // Total length = 40
-        frame[23] = 6;    // TCP
+        frame[17] = 40; // Total length = 40
+        frame[23] = 6; // TCP
         frame[26] = 192;
         frame[27] = 168;
         frame[28] = 1;
@@ -782,8 +852,9 @@ mod tests {
         let counter = AtomicU64::new(0);
         let local_ips = Arc::new(Mutex::new(vec![IpAddr::V4(Ipv4Addr::new(192, 168, 1, 50))]));
         // PACKET_OUTGOING = 4
-        let packet = LiveTrafficSniffer::parse_ethernet_frame_with_meta(&frame, 4, 1, &counter, &local_ips)
-            .expect("Must parse valid IPv4 TCP frame");
+        let packet =
+            LiveTrafficSniffer::parse_ethernet_frame_with_meta(&frame, 4, 1, &counter, &local_ips)
+                .expect("Must parse valid IPv4 TCP frame");
 
         assert_eq!(packet.protocol, "TCP");
         assert_eq!(packet.src_addr, "192.168.1.50");
@@ -801,7 +872,7 @@ mod tests {
         frame[14] = 0x45;
         frame[16] = 0x00;
         frame[17] = 46; // Total Length
-        // Fragment offset = 185 (0x00B9) -> non-initial fragment
+                        // Fragment offset = 185 (0x00B9) -> non-initial fragment
         frame[20] = 0x00;
         frame[21] = 0xB9;
         frame[23] = 6; // Protocol = TCP
@@ -830,12 +901,12 @@ mod tests {
         frame[13] = 0xDD; // IPv6 EtherType
         frame[14] = 0x60; // Version 6
         frame[18] = 0x00;
-        frame[19] = 16;   // Payload length = 16 bytes
-        frame[20] = 0;    // Next Header = Hop-by-Hop (0)
-        // Hop-by-Hop header at offset 54 (14 + 40):
-        frame[54] = 6;    // Next Header inside Hop-by-Hop is TCP (6)
-        frame[55] = 0;    // Header Ext Length: 0 (meaning 8 bytes total)
-        // TCP ports at offset 62 (54 + 8):
+        frame[19] = 16; // Payload length = 16 bytes
+        frame[20] = 0; // Next Header = Hop-by-Hop (0)
+                       // Hop-by-Hop header at offset 54 (14 + 40):
+        frame[54] = 6; // Next Header inside Hop-by-Hop is TCP (6)
+        frame[55] = 0; // Header Ext Length: 0 (meaning 8 bytes total)
+                       // TCP ports at offset 62 (54 + 8):
         frame[62] = 0x01;
         frame[63] = 0xBB; // 443
         frame[64] = 0x1F;

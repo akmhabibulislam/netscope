@@ -35,7 +35,12 @@ impl ConnectionScanner {
         connections
     }
 
-    fn parse_proc_net_tcp(&self, path_str: &str, protocol: Protocol, is_ipv6: bool) -> Vec<NetworkConnection> {
+    fn parse_proc_net_tcp(
+        &self,
+        path_str: &str,
+        protocol: Protocol,
+        is_ipv6: bool,
+    ) -> Vec<NetworkConnection> {
         let path = Path::new(path_str);
         if !path.exists() {
             return Vec::new();
@@ -68,10 +73,11 @@ impl ConnectionScanner {
                 None => continue,
             };
 
-            let (remote_addr, remote_port) = match Self::parse_socket_address(remote_socket, is_ipv6) {
-                Some(res) => res,
-                None => continue,
-            };
+            let (remote_addr, remote_port) =
+                match Self::parse_socket_address(remote_socket, is_ipv6) {
+                    Some(res) => res,
+                    None => continue,
+                };
 
             let state_val = u8::from_str_radix(state_hex, 16).unwrap_or(0);
             let state = match state_val {
@@ -92,7 +98,10 @@ impl ConnectionScanner {
             let inode = inode_str.parse::<u64>().unwrap_or(0);
             let process = self.process_resolver.get_process_by_inode(inode);
 
-            let id = format!("{}:{}-{}:{}-{}", protocol, local_addr, local_port, remote_addr, remote_port);
+            let id = format!(
+                "{}:{}-{}:{}-{}",
+                protocol, local_addr, local_port, remote_addr, remote_port
+            );
 
             results.push(NetworkConnection {
                 id,
@@ -116,7 +125,12 @@ impl ConnectionScanner {
         results
     }
 
-    fn parse_proc_net_udp(&self, path_str: &str, protocol: Protocol, is_ipv6: bool) -> Vec<NetworkConnection> {
+    fn parse_proc_net_udp(
+        &self,
+        path_str: &str,
+        protocol: Protocol,
+        is_ipv6: bool,
+    ) -> Vec<NetworkConnection> {
         let path = Path::new(path_str);
         if !path.exists() {
             return Vec::new();
@@ -148,10 +162,11 @@ impl ConnectionScanner {
                 None => continue,
             };
 
-            let (remote_addr, remote_port) = match Self::parse_socket_address(remote_socket, is_ipv6) {
-                Some(res) => res,
-                None => continue,
-            };
+            let (remote_addr, remote_port) =
+                match Self::parse_socket_address(remote_socket, is_ipv6) {
+                    Some(res) => res,
+                    None => continue,
+                };
 
             let inode = inode_str.parse::<u64>().unwrap_or(0);
             let process = self.process_resolver.get_process_by_inode(inode);
@@ -162,7 +177,10 @@ impl ConnectionScanner {
                 ConnectionState::Connected
             };
 
-            let id = format!("{}:{}-{}:{}-{}", protocol, local_addr, local_port, remote_addr, remote_port);
+            let id = format!(
+                "{}:{}-{}:{}-{}",
+                protocol, local_addr, local_port, remote_addr, remote_port
+            );
 
             results.push(NetworkConnection {
                 id,

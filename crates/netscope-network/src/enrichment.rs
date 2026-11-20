@@ -60,19 +60,40 @@ impl EnrichmentService {
         }
 
         // Query ip-api.com (free, rate limited to 45 req/min, non-commercial)
-        let url = format!("http://ip-api.com/json/{}?fields=status,message,country,regionName,city,isp,org,as", ip);
+        let url = format!(
+            "http://ip-api.com/json/{}?fields=status,message,country,regionName,city,isp,org,as",
+            ip
+        );
         match self.client.get(&url).send().await {
             Ok(resp) => {
                 if let Ok(json) = resp.json::<serde_json::Value>().await {
                     if json.get("status").and_then(|s| s.as_str()) == Some("success") {
                         let enrichment = IpEnrichment {
                             ip: ip.to_string(),
-                            country: json.get("country").and_then(|s| s.as_str()).map(|s| s.to_string()),
-                            region: json.get("regionName").and_then(|s| s.as_str()).map(|s| s.to_string()),
-                            city: json.get("city").and_then(|s| s.as_str()).map(|s| s.to_string()),
-                            isp: json.get("isp").and_then(|s| s.as_str()).map(|s| s.to_string()),
-                            org: json.get("org").and_then(|s| s.as_str()).map(|s| s.to_string()),
-                            asn: json.get("as").and_then(|s| s.as_str()).map(|s| s.to_string()),
+                            country: json
+                                .get("country")
+                                .and_then(|s| s.as_str())
+                                .map(|s| s.to_string()),
+                            region: json
+                                .get("regionName")
+                                .and_then(|s| s.as_str())
+                                .map(|s| s.to_string()),
+                            city: json
+                                .get("city")
+                                .and_then(|s| s.as_str())
+                                .map(|s| s.to_string()),
+                            isp: json
+                                .get("isp")
+                                .and_then(|s| s.as_str())
+                                .map(|s| s.to_string()),
+                            org: json
+                                .get("org")
+                                .and_then(|s| s.as_str())
+                                .map(|s| s.to_string()),
+                            asn: json
+                                .get("as")
+                                .and_then(|s| s.as_str())
+                                .map(|s| s.to_string()),
                         };
                         let mut cache = self.cache.write().await;
                         cache.insert(ip, enrichment.clone());

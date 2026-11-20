@@ -70,12 +70,18 @@ impl ProcessResolver {
 
         self.inode_to_pid = new_inode_to_pid;
         self.pid_cache = new_pid_cache;
-        debug!("Refreshed process resolver: {} socket mappings, {} processes", self.inode_to_pid.len(), self.pid_cache.len());
+        debug!(
+            "Refreshed process resolver: {} socket mappings, {} processes",
+            self.inode_to_pid.len(),
+            self.pid_cache.len()
+        );
         Ok(())
     }
 
     pub fn get_process_by_inode(&self, inode: u64) -> Option<ProcessMetadata> {
-        self.inode_to_pid.get(&inode).and_then(|pid| self.pid_cache.get(pid).cloned())
+        self.inode_to_pid
+            .get(&inode)
+            .and_then(|pid| self.pid_cache.get(pid).cloned())
     }
 
     pub fn get_process_by_pid(&self, pid: u32) -> Option<ProcessMetadata> {

@@ -1,5 +1,7 @@
 use netscope_core::{DataUsageQuota, NetworkProfile};
-use netscope_network::{collector::NetworkCollector, sniffer::LiveTrafficSniffer, speedtest::SpeedTestResult};
+use netscope_network::{
+    collector::NetworkCollector, sniffer::LiveTrafficSniffer, speedtest::SpeedTestResult,
+};
 use netscope_security::SecurityRuleEngine;
 use netscope_storage::StorageManager;
 use parking_lot::RwLock;
@@ -20,12 +22,16 @@ pub struct AppState {
 impl AppState {
     pub fn new() -> Self {
         let collector = NetworkCollector::new();
-        let storage = StorageManager::new(None).unwrap_or_else(|_| StorageManager::new_in_memory().unwrap());
+        let storage =
+            StorageManager::new(None).unwrap_or_else(|_| StorageManager::new_in_memory().unwrap());
         let rule_engine = Arc::new(RwLock::new(SecurityRuleEngine::new(vec![], vec![])));
         let sniffer = LiveTrafficSniffer::new();
         let _ = sniffer.start_capture();
 
-        let quota = Arc::new(RwLock::new(DataUsageQuota::new(netscope_core::QuotaPeriod::Daily, 5000))); // 5GB daily quota
+        let quota = Arc::new(RwLock::new(DataUsageQuota::new(
+            netscope_core::QuotaPeriod::Daily,
+            5000,
+        ))); // 5GB daily quota
         let active_profile = Arc::new(RwLock::new(NetworkProfile::default()));
         let latest_speedtest = Arc::new(RwLock::new(None));
 

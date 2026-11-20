@@ -1,16 +1,16 @@
-pub mod timeline;
+pub mod custom_rule;
+pub mod flow;
 pub mod profile;
 pub mod quota;
-pub mod custom_rule;
 pub mod sniffer;
-pub mod flow;
+pub mod timeline;
 
+pub use custom_rule::{CustomNetworkRule, RuleAction, RuleCondition};
 pub use flow::{CanonicalFlowKey, FlowProtocol, FlowState, FlowTracker, NetworkFlow};
+pub use profile::NetworkProfile;
+pub use quota::{DataUsageQuota, QuotaAlertStatus, QuotaPeriod};
 pub use sniffer::{CapturedPacketSummary, PacketDirection};
 pub use timeline::{NetworkEvent, TimelineEventType};
-pub use profile::NetworkProfile;
-pub use quota::{DataUsageQuota, QuotaPeriod, QuotaAlertStatus};
-pub use custom_rule::{CustomNetworkRule, RuleAction, RuleCondition};
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -63,8 +63,7 @@ impl std::fmt::Display for OperState {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[derive(Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct InterfaceStats {
     pub rx_bytes: u64,
     pub tx_bytes: u64,
@@ -75,7 +74,6 @@ pub struct InterfaceStats {
     pub rx_dropped: u64,
     pub tx_dropped: u64,
 }
-
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NetworkInterface {
@@ -265,7 +263,10 @@ impl Default for AppConfig {
             start_minimized: false,
             active_profile: "Default".to_string(),
             whitelisted_ips: vec!["127.0.0.1".to_string(), "::1".to_string()],
-            whitelisted_processes: vec!["systemd-resolved".to_string(), "NetworkManager".to_string()],
+            whitelisted_processes: vec![
+                "systemd-resolved".to_string(),
+                "NetworkManager".to_string(),
+            ],
         }
     }
 }

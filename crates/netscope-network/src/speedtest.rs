@@ -25,7 +25,11 @@ impl SpeedTestEngine {
         let mut latencies = Vec::new();
         for _ in 0..3 {
             let t0 = Instant::now();
-            let conn = timeout(std::time::Duration::from_secs(3), TcpStream::connect(server_addr)).await;
+            let conn = timeout(
+                std::time::Duration::from_secs(3),
+                TcpStream::connect(server_addr),
+            )
+            .await;
             match conn {
                 Ok(Ok(stream)) => {
                     latencies.push(t0.elapsed().as_secs_f64() * 1000.0);
@@ -37,9 +41,15 @@ impl SpeedTestEngine {
 
         let latency_ms = latencies.iter().sum::<f64>() / latencies.len().max(1) as f64;
         let jitter_ms = if latencies.len() > 1 {
-            (latencies.iter().max_by(|a, b| a.partial_cmp(b).unwrap()).unwrap()
-                - latencies.iter().min_by(|a, b| a.partial_cmp(b).unwrap()).unwrap())
-                .abs()
+            (latencies
+                .iter()
+                .max_by(|a, b| a.partial_cmp(b).unwrap())
+                .unwrap()
+                - latencies
+                    .iter()
+                    .min_by(|a, b| a.partial_cmp(b).unwrap())
+                    .unwrap())
+            .abs()
         } else {
             1.2
         };

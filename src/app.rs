@@ -3,8 +3,8 @@ use crate::state::AppState;
 use gtk4::glib;
 use gtk4::prelude::*;
 use gtk4::{
-    Application, ApplicationWindow, Box as GtkBox, Button, Entry, HeaderBar, Label,
-    Orientation, Paned, ScrolledWindow, Stack, StackSidebar, Window,
+    Application, ApplicationWindow, Box as GtkBox, Button, Entry, HeaderBar, Label, Orientation,
+    Paned, ScrolledWindow, Stack, StackSidebar, Window,
 };
 use libadwaita as adw;
 use netscope_core::Protocol;
@@ -103,6 +103,10 @@ fn build_ui(app: &Application) {
     let (packets_view, update_packets) = create_packets_page(&state);
     stack.add_titled(&packets_view, Some("packets"), "Packet Inspector");
 
+    // 4b. Network Conversations / Flows
+    let (flows_view, update_flows) = create_flows_page(&state);
+    stack.add_titled(&flows_view, Some("flows"), "Active Conversations");
+
     // 5. Timeline of Network Events
     let (timeline_view, update_timeline) = create_timeline_page(&state);
     stack.add_titled(&timeline_view, Some("timeline"), "Network Timeline");
@@ -169,6 +173,7 @@ fn build_ui(app: &Application) {
     update_conn();
     update_proc();
     update_packets();
+    update_flows();
     update_timeline();
     update_wifi();
     update_dns();
@@ -178,6 +183,7 @@ fn build_ui(app: &Application) {
     glib::timeout_add_local(std::time::Duration::from_millis(1500), move || {
         update_dash();
         update_packets();
+        update_flows();
         update_sec();
         glib::ControlFlow::Continue
     });
@@ -279,7 +285,10 @@ fn create_dashboard_page(state: &AppState, rt: Arc<Runtime>) -> (GtkBox, Rc<dyn 
                 gr.push_sample(sample.rx_speed_bps, sample.tx_speed_bps);
                 let _ = st.storage.insert_bandwidth_sample(&sample);
 
-                let active_if = sample.active_interface.clone().unwrap_or_else(|| "lo".to_string());
+                let active_if = sample
+                    .active_interface
+                    .clone()
+                    .unwrap_or_else(|| "lo".to_string());
                 if_val.set_text(&active_if);
 
                 r_val.set_text(&format!("{:.2} KB/s", sample.rx_speed_bps / 8000.0));
@@ -340,107 +349,131 @@ fn create_connections_page(
 
     let update_fn: Rc<dyn Fn()> = Rc::new(move || {
         let st = state_clone.clone();
-        let conns = rt_clone.block_on(async { st.collector.poll_connections().await });
+        let rt = rt_clone.clone();
+        let list = list_clone.clone();
+        let parent = parent_clone.clone();
 
-        while let Some(child) = list_clone.first_child() {
-            list_clone.remove(&child);
-        }
+        let (sender, receiver) = async_channel::bounded(1);
+        std::thread::spawn(move || {
+            let conns = rt.block_on(async { st.collector.poll_connections().await });
+            let _ = sender.send_blocking(conns);
+        });
 
-        for conn in conns.into_iter().take(80) {
-            let row = GtkBox::new(Orientation::Horizontal, 12);
-            row.set_margin_top(4);
-            row.set_margin_bottom(4);
-            row.set_margin_start(10);
-            row.set_margin_end(10);
+        glib::spawn_future_local(async move {
+            if let Ok(conns) = receiver.recv().await {
+                while let Some(child) = list.first_child() {
+                    list.remove(&child);
+                }
 
-            let proto_lbl = Label::new(Some(&conn.protocol.to_string()));
-            proto_lbl.add_css_class("badge");
-            proto_lbl.add_css_class(if conn.protocol == Protocol::Tcp { "badge-info" } else { "badge-warning" });
+                for conn in conns.into_iter().take(80) {
+                    let row = GtkBox::new(Orientation::Horizontal, 12);
+                    row.set_margin_top(4);
+                    row.set_margin_bottom(4);
+                    row.set_margin_start(10);
+                    row.set_margin_end(10);
 
-            let local_lbl = Label::new(Some(&format!("{}:{}", conn.local_addr, conn.local_port)));
-            local_lbl.set_width_chars(21);
-            local_lbl.set_halign(gtk4::Align::Start);
+                    let proto_lbl = Label::new(Some(&conn.protocol.to_string()));
+                    proto_lbl.add_css_class("badge");
+                    proto_lbl.add_css_class(if conn.protocol == Protocol::Tcp {
+                        "badge-info"
+                    } else {
+                        "badge-warning"
+                    });
 
-            let arrow = Label::new(Some("→"));
-            arrow.add_css_class("accent-blue");
+                    let local_lbl =
+                        Label::new(Some(&format!("{}:{}", conn.local_addr, conn.local_port)));
+                    local_lbl.set_width_chars(21);
+                    local_lbl.set_halign(gtk4::Align::Start);
 
-            let remote_lbl = Label::new(Some(&format!("{}:{}", conn.remote_addr, conn.remote_port)));
-            remote_lbl.set_width_chars(21);
-            remote_lbl.set_halign(gtk4::Align::Start);
+                    let arrow = Label::new(Some("→"));
+                    arrow.add_css_class("accent-blue");
 
-            let state_lbl = Label::new(Some(&conn.state.to_string()));
-            state_lbl.set_width_chars(13);
-            state_lbl.add_css_class("badge");
-            state_lbl.add_css_class(if conn.state == netscope_core::ConnectionState::Established {
-                "badge-success"
-            } else if conn.state == netscope_core::ConnectionState::Listen {
-                "badge-info"
-            } else {
-                "badge-warning"
-            });
+                    let remote_lbl =
+                        Label::new(Some(&format!("{}:{}", conn.remote_addr, conn.remote_port)));
+                    remote_lbl.set_width_chars(21);
+                    remote_lbl.set_halign(gtk4::Align::Start);
 
-            let proc_str = conn.process.as_ref().map(|p| format!("{} (PID {})", p.name, p.pid)).unwrap_or_else(|| "-".to_string());
-            let proc_lbl = Label::new(Some(&proc_str));
-            proc_lbl.set_halign(gtk4::Align::Start);
-            proc_lbl.set_hexpand(true);
+                    let state_lbl = Label::new(Some(&conn.state.to_string()));
+                    state_lbl.set_width_chars(13);
+                    state_lbl.add_css_class("badge");
+                    state_lbl.add_css_class(
+                        if conn.state == netscope_core::ConnectionState::Established {
+                            "badge-success"
+                        } else if conn.state == netscope_core::ConnectionState::Listen {
+                            "badge-info"
+                        } else {
+                            "badge-warning"
+                        },
+                    );
 
-            let inspect_btn = Button::with_label("Inspect");
-            inspect_btn.add_css_class("subtext");
-            let conn_copy = conn.clone();
-            let p_win = parent_clone.clone();
-            inspect_btn.connect_clicked(move |_| {
-                show_connection_inspector(&p_win, &conn_copy);
-            });
+                    let proc_str = conn
+                        .process
+                        .as_ref()
+                        .map(|p| format!("{} (PID {})", p.name, p.pid))
+                        .unwrap_or_else(|| "-".to_string());
+                    let proc_lbl = Label::new(Some(&proc_str));
+                    proc_lbl.set_halign(gtk4::Align::Start);
+                    proc_lbl.set_hexpand(true);
 
-            let kill_btn = Button::with_label("Drop");
-            kill_btn.add_css_class("destructive-action");
-            let local_s = format!("{}:{}", conn.local_addr, conn.local_port);
-            let remote_s = format!("{}:{}", conn.remote_addr, conn.remote_port);
-            let p_win = parent_window.clone();
-            kill_btn.connect_clicked(move |_| {
-                let alert = gtk4::AlertDialog::builder()
-                    .modal(true)
-                    .message(format!("Terminate TCP Connection?\n\n{} -> {}", local_s, remote_s))
-                    .detail("This will immediately send a TCP reset (ss -K) to tear down the socket. Active transfers will be dropped.")
-                    .buttons(["Cancel", "Terminate Connection"])
-                    .cancel_button(0)
-                    .default_button(1)
-                    .build();
+                    let inspect_btn = Button::with_label("Inspect");
+                    inspect_btn.add_css_class("subtext");
+                    let conn_copy = conn.clone();
+                    let p_win = parent.clone();
+                    inspect_btn.connect_clicked(move |_| {
+                        show_connection_inspector(&p_win, &conn_copy);
+                    });
 
-                let loc = local_s.clone();
-                let rem = remote_s.clone();
-                let pw = p_win.clone();
-                let pw_for_err = p_win.clone();
-                alert.choose(Some(&pw), None::<&gtk4::gio::Cancellable>, move |choice| {
-                    if choice == Ok(1) {
-                        match NetworkFirewall::kill_connection(&loc, &rem) {
-                            Ok(msg) => {
-                                tracing::info!("{}", msg);
+                    let kill_btn = Button::with_label("Drop");
+                    kill_btn.add_css_class("destructive-action");
+                    let local_s = format!("{}:{}", conn.local_addr, conn.local_port);
+                    let remote_s = format!("{}:{}", conn.remote_addr, conn.remote_port);
+                    let p_win = parent.clone();
+                    kill_btn.connect_clicked(move |_| {
+                        let alert = gtk4::AlertDialog::builder()
+                            .modal(true)
+                            .message(format!("Terminate TCP Connection?\n\n{} -> {}", local_s, remote_s))
+                            .detail("This will immediately send a TCP reset (ss -K) to tear down the socket. Active transfers will be dropped.")
+                            .buttons(["Cancel", "Terminate Connection"])
+                            .cancel_button(0)
+                            .default_button(1)
+                            .build();
+
+                        let loc = local_s.clone();
+                        let rem = remote_s.clone();
+                        let pw = p_win.clone();
+                        let pw_for_err = p_win.clone();
+                        alert.choose(Some(&pw), None::<&gtk4::gio::Cancellable>, move |choice| {
+                            if choice == Ok(1) {
+                                match NetworkFirewall::kill_connection(&loc, &rem) {
+                                    Ok(msg) => {
+                                        tracing::info!("{}", msg);
+                                    }
+                                    Err(e) => {
+                                        let err_dialog = gtk4::AlertDialog::builder()
+                                            .modal(true)
+                                            .message("Failed to Terminate Connection")
+                                            .detail(e)
+                                            .build();
+                                        err_dialog.show(Some(&pw_for_err));
+                                    }
+                                }
                             }
-                            Err(e) => {
-                                let err_dialog = gtk4::AlertDialog::builder()
-                                    .modal(true)
-                                    .message("Failed to Terminate Connection")
-                                    .detail(e)
-                                    .build();
-                                err_dialog.show(Some(&pw_for_err));
-                            }
-                        }
-                    }
-                });
-            });
+                        });
+                    });
 
-            row.append(&proto_lbl);
-            row.append(&local_lbl);
-            row.append(&arrow);
-            row.append(&remote_lbl);
-            row.append(&state_lbl);
-            row.append(&proc_lbl);
-            row.append(&inspect_btn);
-            row.append(&kill_btn);
+                    row.append(&proto_lbl);
+                    row.append(&local_lbl);
+                    row.append(&arrow);
+                    row.append(&remote_lbl);
+                    row.append(&state_lbl);
+                    row.append(&proc_lbl);
+                    row.append(&inspect_btn);
+                    row.append(&kill_btn);
 
-            list_clone.append(&row);
-        }
+                    list.append(&row);
+                }
+            }
+        });
     });
 
     let u_clone = update_fn.clone();
@@ -454,7 +487,10 @@ fn create_connections_page(
 fn show_connection_inspector(parent: &ApplicationWindow, conn: &netscope_core::NetworkConnection) {
     let dialog = Window::builder()
         .transient_for(parent)
-        .title(format!("Connection Inspector — {}:{}", conn.remote_addr, conn.remote_port))
+        .title(format!(
+            "Connection Inspector — {}:{}",
+            conn.remote_addr, conn.remote_port
+        ))
         .modal(true)
         .default_width(520)
         .default_height(400)
@@ -487,18 +523,41 @@ fn show_connection_inspector(parent: &ApplicationWindow, conn: &netscope_core::N
     };
 
     add_field(&details_card, "Protocol", &conn.protocol.to_string());
-    add_field(&details_card, "Local Endpoint", &format!("{}:{}", conn.local_addr, conn.local_port));
-    add_field(&details_card, "Remote Endpoint", &format!("{}:{}", conn.remote_addr, conn.remote_port));
+    add_field(
+        &details_card,
+        "Local Endpoint",
+        &format!("{}:{}", conn.local_addr, conn.local_port),
+    );
+    add_field(
+        &details_card,
+        "Remote Endpoint",
+        &format!("{}:{}", conn.remote_addr, conn.remote_port),
+    );
     add_field(&details_card, "Socket State", &conn.state.to_string());
     add_field(&details_card, "Socket Inode", &conn.inode.to_string());
 
     if let Some(ref p) = conn.process {
         add_field(&details_card, "Process Name", &p.name);
         add_field(&details_card, "PID", &p.pid.to_string());
-        add_field(&details_card, "UID / User", &format!("{} ({})", p.uid, p.user.as_deref().unwrap_or("unknown")));
-        add_field(&details_card, "Executable Path", &p.exe_path.as_ref().map(|path| path.to_string_lossy().to_string()).unwrap_or_else(|| "N/A".to_string()));
+        add_field(
+            &details_card,
+            "UID / User",
+            &format!("{} ({})", p.uid, p.user.as_deref().unwrap_or("unknown")),
+        );
+        add_field(
+            &details_card,
+            "Executable Path",
+            &p.exe_path
+                .as_ref()
+                .map(|path| path.to_string_lossy().to_string())
+                .unwrap_or_else(|| "N/A".to_string()),
+        );
     } else {
-        add_field(&details_card, "Process Attribution", "Unattributed or kernel worker");
+        add_field(
+            &details_card,
+            "Process Attribution",
+            "Unattributed or kernel worker",
+        );
     }
 
     content.append(&details_card);
@@ -531,66 +590,90 @@ fn create_processes_page(state: &AppState, rt: Arc<Runtime>) -> (GtkBox, Rc<dyn 
     container.append(&scrolled);
 
     let state_clone = state.clone();
+    let rt_clone = rt.clone();
     let list_clone = list_box.clone();
 
     let update_fn: Rc<dyn Fn()> = Rc::new(move || {
         let st = state_clone.clone();
-        let conns = rt.block_on(async { st.collector.poll_connections().await });
+        let rt = rt_clone.clone();
+        let list = list_clone.clone();
 
-        let mut proc_map: std::collections::HashMap<String, (u32, usize, Vec<Protocol>, Option<std::path::PathBuf>)> = std::collections::HashMap::new();
+        let (sender, receiver) = async_channel::bounded(1);
+        std::thread::spawn(move || {
+            let conns = rt.block_on(async { st.collector.poll_connections().await });
+            let _ = sender.send_blocking(conns);
+        });
 
-        for conn in conns {
-            if let Some(p) = conn.process {
-                let entry = proc_map.entry(p.name).or_insert((p.pid, 0, Vec::new(), p.exe_path));
-                entry.1 += 1;
-                if !entry.2.contains(&conn.protocol) {
-                    entry.2.push(conn.protocol);
+        glib::spawn_future_local(async move {
+            if let Ok(conns) = receiver.recv().await {
+                let mut proc_map: std::collections::HashMap<
+                    String,
+                    (u32, usize, Vec<Protocol>, Option<std::path::PathBuf>),
+                > = std::collections::HashMap::new();
+
+                for conn in conns {
+                    if let Some(p) = conn.process {
+                        let entry =
+                            proc_map
+                                .entry(p.name)
+                                .or_insert((p.pid, 0, Vec::new(), p.exe_path));
+                        entry.1 += 1;
+                        if !entry.2.contains(&conn.protocol) {
+                            entry.2.push(conn.protocol);
+                        }
+                    }
+                }
+
+                while let Some(child) = list.first_child() {
+                    list.remove(&child);
+                }
+
+                for (name, (pid, count, protos, path)) in proc_map {
+                    let row = GtkBox::new(Orientation::Horizontal, 14);
+                    row.set_margin_top(6);
+                    row.set_margin_bottom(6);
+                    row.set_margin_start(12);
+                    row.set_margin_end(12);
+
+                    let pid_badge = Label::new(Some(&format!("PID {}", pid)));
+                    pid_badge.add_css_class("badge");
+                    pid_badge.add_css_class("badge-info");
+
+                    let name_lbl = Label::new(Some(&name));
+                    name_lbl.add_css_class("heading-2");
+                    name_lbl.set_width_chars(18);
+                    name_lbl.set_halign(gtk4::Align::Start);
+
+                    let sockets_lbl = Label::new(Some(&format!("{} open sockets", count)));
+                    sockets_lbl.set_width_chars(16);
+                    sockets_lbl.set_halign(gtk4::Align::Start);
+
+                    let protos_str = protos
+                        .iter()
+                        .map(|p| p.to_string())
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    let protos_lbl = Label::new(Some(&protos_str));
+                    protos_lbl.set_width_chars(12);
+
+                    let path_str = path
+                        .map(|p| p.to_string_lossy().to_string())
+                        .unwrap_or_else(|| "-".to_string());
+                    let path_lbl = Label::new(Some(&path_str));
+                    path_lbl.set_halign(gtk4::Align::Start);
+                    path_lbl.set_hexpand(true);
+                    path_lbl.add_css_class("dim-label");
+
+                    row.append(&pid_badge);
+                    row.append(&name_lbl);
+                    row.append(&sockets_lbl);
+                    row.append(&protos_lbl);
+                    row.append(&path_lbl);
+
+                    list.append(&row);
                 }
             }
-        }
-
-        while let Some(child) = list_clone.first_child() {
-            list_clone.remove(&child);
-        }
-
-        for (name, (pid, count, protos, path)) in proc_map {
-            let row = GtkBox::new(Orientation::Horizontal, 14);
-            row.set_margin_top(6);
-            row.set_margin_bottom(6);
-            row.set_margin_start(12);
-            row.set_margin_end(12);
-
-            let pid_badge = Label::new(Some(&format!("PID {}", pid)));
-            pid_badge.add_css_class("badge");
-            pid_badge.add_css_class("badge-info");
-
-            let name_lbl = Label::new(Some(&name));
-            name_lbl.add_css_class("heading-2");
-            name_lbl.set_width_chars(18);
-            name_lbl.set_halign(gtk4::Align::Start);
-
-            let sockets_lbl = Label::new(Some(&format!("{} open sockets", count)));
-            sockets_lbl.set_width_chars(16);
-            sockets_lbl.set_halign(gtk4::Align::Start);
-
-            let protos_str = protos.iter().map(|p| p.to_string()).collect::<Vec<_>>().join(", ");
-            let protos_lbl = Label::new(Some(&protos_str));
-            protos_lbl.set_width_chars(12);
-
-            let path_str = path.map(|p| p.to_string_lossy().to_string()).unwrap_or_else(|| "-".to_string());
-            let path_lbl = Label::new(Some(&path_str));
-            path_lbl.set_halign(gtk4::Align::Start);
-            path_lbl.set_hexpand(true);
-            path_lbl.add_css_class("dim-label");
-
-            row.append(&pid_badge);
-            row.append(&name_lbl);
-            row.append(&sockets_lbl);
-            row.append(&protos_lbl);
-            row.append(&path_lbl);
-
-            list_clone.append(&row);
-        }
+        });
     });
 
     (container, update_fn)
@@ -669,7 +752,11 @@ fn create_packets_page(state: &AppState) -> (GtkBox, Rc<dyn Fn()>) {
             proto_badge.add_css_class("badge-info");
             proto_badge.set_width_chars(8);
 
-            let src_lbl = Label::new(Some(&format!("{}:{}", pkt.src_addr, pkt.src_port.unwrap_or(0))));
+            let src_lbl = Label::new(Some(&format!(
+                "{}:{}",
+                pkt.src_addr,
+                pkt.src_port.unwrap_or(0)
+            )));
             src_lbl.set_width_chars(21);
             src_lbl.set_halign(gtk4::Align::Start);
 
@@ -679,7 +766,11 @@ fn create_packets_page(state: &AppState) -> (GtkBox, Rc<dyn Fn()>) {
             }));
             arrow.add_css_class("stat-label");
 
-            let dst_lbl = Label::new(Some(&format!("{}:{}", pkt.dst_addr, pkt.dst_port.unwrap_or(0))));
+            let dst_lbl = Label::new(Some(&format!(
+                "{}:{}",
+                pkt.dst_addr,
+                pkt.dst_port.unwrap_or(0)
+            )));
             dst_lbl.set_width_chars(21);
             dst_lbl.set_halign(gtk4::Align::Start);
 
@@ -698,6 +789,123 @@ fn create_packets_page(state: &AppState) -> (GtkBox, Rc<dyn Fn()>) {
             row.append(&dst_lbl);
             row.append(&len_lbl);
             row.append(&summary_lbl);
+
+            list_clone.append(&row);
+        }
+    });
+
+    (container, update_fn)
+}
+
+fn create_flows_page(state: &AppState) -> (GtkBox, Rc<dyn Fn()>) {
+    let container = GtkBox::new(Orientation::Vertical, 12);
+    container.add_css_class("view-container");
+
+    let top_bar = GtkBox::new(Orientation::Horizontal, 12);
+    let title = Label::new(Some("Bidirectional Network Conversations & Session Flows"));
+    title.add_css_class("heading-1");
+    top_bar.append(&title);
+    container.append(&top_bar);
+
+    let desc_card = GtkBox::new(Orientation::Horizontal, 10);
+    desc_card.add_css_class("card");
+    let desc_lbl = Label::new(Some(
+        "Aggregates live raw packets into canonical bidirectional sessions (A ⇄ B), tracking connection state, transfer byte metrics, and packet distributions."
+    ));
+    desc_lbl.set_wrap(true);
+    desc_lbl.set_halign(gtk4::Align::Start);
+    desc_card.append(&desc_lbl);
+    container.append(&desc_card);
+
+    let scrolled = ScrolledWindow::new();
+    scrolled.set_vexpand(true);
+
+    let list_box = gtk4::ListBox::new();
+    list_box.add_css_class("card");
+    scrolled.set_child(Some(&list_box));
+    container.append(&scrolled);
+
+    let sniffer_clone = state.sniffer.clone();
+    let list_clone = list_box.clone();
+
+    let update_fn: Rc<dyn Fn()> = Rc::new(move || {
+        let flows = sniffer_clone.get_active_flows();
+
+        while let Some(child) = list_clone.first_child() {
+            list_clone.remove(&child);
+        }
+
+        if flows.is_empty() {
+            let row = GtkBox::new(Orientation::Horizontal, 10);
+            row.set_margin_top(12);
+            row.set_margin_bottom(12);
+            row.set_margin_start(16);
+            let lbl = Label::new(Some("No active network flows recorded. Capture worker idle or awaiting packet activity."));
+            lbl.add_css_class("dim-label");
+            row.append(&lbl);
+            list_clone.append(&row);
+            return;
+        }
+
+        for flow in flows.into_iter().take(60) {
+            let row = GtkBox::new(Orientation::Horizontal, 12);
+            row.set_margin_top(4);
+            row.set_margin_bottom(4);
+            row.set_margin_start(10);
+            row.set_margin_end(10);
+
+            let proto_badge = Label::new(Some(&flow.key.protocol.to_string()));
+            proto_badge.add_css_class("badge");
+            proto_badge.add_css_class("badge-info");
+            proto_badge.set_width_chars(6);
+
+            let state_badge = Label::new(Some(&flow.state.to_string()));
+            state_badge.add_css_class("badge");
+            state_badge.add_css_class(match flow.state {
+                netscope_core::FlowState::Established => "badge-success",
+                netscope_core::FlowState::Closing | netscope_core::FlowState::Closed => {
+                    "badge-warning"
+                }
+                _ => "badge-info",
+            });
+            state_badge.set_width_chars(11);
+
+            let ep_a = format!("{}:{}", flow.key.endpoint_a.0, flow.key.endpoint_a.1);
+            let a_lbl = Label::new(Some(&ep_a));
+            a_lbl.set_width_chars(21);
+            a_lbl.set_halign(gtk4::Align::Start);
+
+            let arrow = Label::new(Some("⇄"));
+            arrow.add_css_class("accent-blue");
+
+            let ep_b = format!("{}:{}", flow.key.endpoint_b.0, flow.key.endpoint_b.1);
+            let b_lbl = Label::new(Some(&ep_b));
+            b_lbl.set_width_chars(21);
+            b_lbl.set_halign(gtk4::Align::Start);
+
+            let total_mb = flow.total_bytes() as f64 / 1024.0;
+            let bytes_lbl = Label::new(Some(&format!("{:.1} KB", total_mb)));
+            bytes_lbl.set_width_chars(10);
+            bytes_lbl.set_halign(gtk4::Align::End);
+
+            let pkts_lbl = Label::new(Some(&format!("{} pkts", flow.total_packets())));
+            pkts_lbl.set_width_chars(10);
+            pkts_lbl.set_halign(gtk4::Align::End);
+            pkts_lbl.add_css_class("dim-label");
+
+            let dur_lbl = Label::new(Some(&format!("{}s", flow.duration_seconds())));
+            dur_lbl.set_width_chars(6);
+            dur_lbl.set_halign(gtk4::Align::End);
+            dur_lbl.add_css_class("dim-label");
+
+            row.append(&proto_badge);
+            row.append(&state_badge);
+            row.append(&a_lbl);
+            row.append(&arrow);
+            row.append(&b_lbl);
+            row.append(&bytes_lbl);
+            row.append(&pkts_lbl);
+            row.append(&dur_lbl);
 
             list_clone.append(&row);
         }
@@ -782,7 +990,9 @@ fn create_investigation_page(rt: Arc<Runtime>) -> GtkBox {
 
     let search_box = GtkBox::new(Orientation::Horizontal, 8);
     let entry = Entry::new();
-    entry.set_placeholder_text(Some("Enter IP address or domain (e.g. 1.1.1.1, github.com)..."));
+    entry.set_placeholder_text(Some(
+        "Enter IP address or domain (e.g. 1.1.1.1, github.com)...",
+    ));
     entry.set_hexpand(true);
     let run_btn = Button::with_label("Investigate");
     run_btn.add_css_class("suggested-action");
@@ -795,7 +1005,9 @@ fn create_investigation_page(rt: Arc<Runtime>) -> GtkBox {
     let res_title = Label::new(Some("INVESTIGATION REPORT"));
     res_title.add_css_class("stat-label");
     res_title.set_halign(gtk4::Align::Start);
-    let res_text = Label::new(Some("Enter an address above to evaluate routing provenance and reputation."));
+    let res_text = Label::new(Some(
+        "Enter an address above to evaluate routing provenance and reputation.",
+    ));
     res_text.set_halign(gtk4::Align::Start);
     card.append(&res_title);
     card.append(&res_text);
@@ -852,7 +1064,9 @@ fn create_speedtest_page(rt: Arc<Runtime>) -> GtkBox {
     start_btn.add_css_class("suggested-action");
     card.append(&start_btn);
 
-    let results_lbl = Label::new(Some("Click above to benchmark latency, jitter, and download/upload throughput."));
+    let results_lbl = Label::new(Some(
+        "Click above to benchmark latency, jitter, and download/upload throughput.",
+    ));
     results_lbl.set_halign(gtk4::Align::Start);
     card.append(&results_lbl);
     container.append(&card);
@@ -929,28 +1143,65 @@ fn create_wifi_page(state: &AppState, rt: Arc<Runtime>) -> (GtkBox, Rc<dyn Fn()>
     container.append(&info_card);
 
     let st_clone = state.clone();
+    let rt_clone = rt.clone();
     let update_fn: Rc<dyn Fn()> = Rc::new(move || {
         let st = st_clone.clone();
-        let ifaces = rt.block_on(async { st.collector.poll_interfaces().await });
-        let wifi_iface = ifaces.iter().find(|i| i.if_type == netscope_core::InterfaceType::WiFi || i.name.starts_with("wl"));
+        let rt = rt_clone.clone();
+        let s_lbl = ssid_lbl.clone();
+        let b_lbl = bssid_lbl.clone();
+        let sig_lbl = signal_lbl.clone();
+        let q_lbl = quality_lbl.clone();
+        let f_lbl = freq_lbl.clone();
 
-        if let Some(iface) = wifi_iface {
-            if let Some(details) = WifiScanner::get_wifi_details(&iface.name) {
-                ssid_lbl.set_text(&format!("SSID: {}", details.ssid.unwrap_or_else(|| "Connected".to_string())));
-                bssid_lbl.set_text(&format!("BSSID / Access Point: {}", details.bssid.unwrap_or_else(|| "N/A".to_string())));
-                signal_lbl.set_text(&format!("Signal RSSI: {} dBm", details.signal_dbm.map(|s| s.to_string()).unwrap_or_else(|| "-".to_string())));
-                quality_lbl.set_text(&format!("Link Quality: {}", details.link_quality.unwrap_or_else(|| "-".to_string())));
-                freq_lbl.set_text(&format!(
-                    "Frequency: {:.3} GHz | TX Bitrate: {:.1} Mbps",
-                    details.frequency_ghz.unwrap_or(0.0),
-                    details.tx_bitrate_mbps.unwrap_or(0.0)
-                ));
-            } else {
-                ssid_lbl.set_text(&format!("Wi-Fi Interface ({}) Idle / Unassociated", iface.name));
+        let (sender, receiver) = async_channel::bounded(1);
+        std::thread::spawn(move || {
+            let ifaces = rt.block_on(async { st.collector.poll_interfaces().await });
+            let _ = sender.send_blocking(ifaces);
+        });
+
+        glib::spawn_future_local(async move {
+            if let Ok(ifaces) = receiver.recv().await {
+                let wifi_iface = ifaces.iter().find(|i| {
+                    i.if_type == netscope_core::InterfaceType::WiFi || i.name.starts_with("wl")
+                });
+
+                if let Some(iface) = wifi_iface {
+                    if let Some(details) = WifiScanner::get_wifi_details(&iface.name) {
+                        s_lbl.set_text(&format!(
+                            "SSID: {}",
+                            details.ssid.unwrap_or_else(|| "Connected".to_string())
+                        ));
+                        b_lbl.set_text(&format!(
+                            "BSSID / Access Point: {}",
+                            details.bssid.unwrap_or_else(|| "N/A".to_string())
+                        ));
+                        sig_lbl.set_text(&format!(
+                            "Signal RSSI: {} dBm",
+                            details
+                                .signal_dbm
+                                .map(|s| s.to_string())
+                                .unwrap_or_else(|| "-".to_string())
+                        ));
+                        q_lbl.set_text(&format!(
+                            "Link Quality: {}",
+                            details.link_quality.unwrap_or_else(|| "-".to_string())
+                        ));
+                        f_lbl.set_text(&format!(
+                            "Frequency: {:.3} GHz | TX Bitrate: {:.1} Mbps",
+                            details.frequency_ghz.unwrap_or(0.0),
+                            details.tx_bitrate_mbps.unwrap_or(0.0)
+                        ));
+                    } else {
+                        s_lbl.set_text(&format!(
+                            "Wi-Fi Interface ({}) Idle / Unassociated",
+                            iface.name
+                        ));
+                    }
+                } else {
+                    s_lbl.set_text("No active Wi-Fi interface detected on this machine");
+                }
             }
-        } else {
-            ssid_lbl.set_text("No active Wi-Fi interface detected on this machine");
-        }
+        });
     });
 
     (container, update_fn)
@@ -998,16 +1249,22 @@ fn create_dns_page(rt: Arc<Runtime>) -> (GtkBox, Rc<dyn Fn()>) {
 
     query_btn.connect_clicked(move |_| {
         let domain = entry_clone.text().to_string();
-        if domain.is_empty() { return; }
+        if domain.is_empty() {
+            return;
+        }
 
         res_text_clone.set_text("Resolving...");
         let rt = rt_clone.clone();
-        let (sender, receiver) = async_channel::bounded::<Result<netscope_core::DnsRecord, String>>(1);
+        let (sender, receiver) =
+            async_channel::bounded::<Result<netscope_core::DnsRecord, String>>(1);
 
         std::thread::spawn(move || {
             let res = rt.block_on(async {
                 if let Ok(inspector) = DnsInspector::new() {
-                    inspector.resolve(&domain, "A").await.map_err(|e| e.to_string())
+                    inspector
+                        .resolve(&domain, "A")
+                        .await
+                        .map_err(|e| e.to_string())
                 } else {
                     Err("Failed to initialize resolver".to_string())
                 }
@@ -1108,7 +1365,12 @@ fn create_diagnostics_page(rt: Arc<Runtime>) -> GtkBox {
         let (sender, receiver) = async_channel::bounded(1);
         std::thread::spawn(move || {
             let res = rt.block_on(async {
-                DiagnosticsEngine::test_tcp_port("google.com", 443, std::time::Duration::from_secs(3)).await
+                DiagnosticsEngine::test_tcp_port(
+                    "google.com",
+                    443,
+                    std::time::Duration::from_secs(3),
+                )
+                .await
             });
             let _ = sender.send_blocking(res);
         });
@@ -1117,9 +1379,15 @@ fn create_diagnostics_page(rt: Arc<Runtime>) -> GtkBox {
         glib::spawn_future_local(async move {
             if let Ok(res) = receiver.recv().await {
                 if res.is_reachable {
-                    l.set_text(&format!("Connection Successful!\nTarget: google.com:443\nLatency: {:.2} ms", res.latency_ms.unwrap_or(0.0)));
+                    l.set_text(&format!(
+                        "Connection Successful!\nTarget: google.com:443\nLatency: {:.2} ms",
+                        res.latency_ms.unwrap_or(0.0)
+                    ));
                 } else {
-                    l.set_text(&format!("Connection Failed!\nError: {}", res.error.unwrap_or_default()));
+                    l.set_text(&format!(
+                        "Connection Failed!\nError: {}",
+                        res.error.unwrap_or_default()
+                    ));
                 }
             }
         });
@@ -1129,11 +1397,17 @@ fn create_diagnostics_page(rt: Arc<Runtime>) -> GtkBox {
     routes_btn.connect_clicked(move |_| {
         let rts = DiagnosticsEngine::get_routing_table();
         let mut text = String::from("Kernel Routing Table:\n\n");
-        text.push_str(&format!("{:<18} {:<18} {:<18} {:<8} {:<8}\n", "Destination", "Gateway", "Genmask", "Flags", "Iface"));
+        text.push_str(&format!(
+            "{:<18} {:<18} {:<18} {:<8} {:<8}\n",
+            "Destination", "Gateway", "Genmask", "Flags", "Iface"
+        ));
         text.push_str(&"-".repeat(70));
         text.push('\n');
         for r in rts {
-            text.push_str(&format!("{:<18} {:<18} {:<18} {:<8} {:<8}\n", r.destination, r.gateway, r.genmask, r.flags, r.interface));
+            text.push_str(&format!(
+                "{:<18} {:<18} {:<18} {:<8} {:<8}\n",
+                r.destination, r.gateway, r.genmask, r.flags, r.interface
+            ));
         }
         lbl_routes.set_text(&text);
     });
@@ -1145,9 +1419,26 @@ fn create_security_page(state: &AppState, rt: Arc<Runtime>) -> (GtkBox, Rc<dyn F
     let container = GtkBox::new(Orientation::Vertical, 12);
     container.add_css_class("view-container");
 
+    let top_bar = GtkBox::new(Orientation::Horizontal, 12);
     let title = Label::new(Some("Security Center & Threat Intelligence"));
     title.add_css_class("heading-1");
-    container.append(&title);
+    title.set_hexpand(true);
+    title.set_halign(gtk4::Align::Start);
+    top_bar.append(&title);
+
+    let refresh_feeds_btn = Button::with_label("Update Threat Feeds");
+    refresh_feeds_btn.add_css_class("subtext");
+    top_bar.append(&refresh_feeds_btn);
+    container.append(&top_bar);
+
+    let status_banner = GtkBox::new(Orientation::Horizontal, 10);
+    status_banner.add_css_class("card");
+    let status_lbl = Label::new(Some(
+        "Active Indicators: 0 | Live threat detection enabled across all network connections.",
+    ));
+    status_lbl.set_halign(gtk4::Align::Start);
+    status_banner.append(&status_lbl);
+    container.append(&status_banner);
 
     let scrolled = ScrolledWindow::new();
     scrolled.set_vexpand(true);
@@ -1158,70 +1449,138 @@ fn create_security_page(state: &AppState, rt: Arc<Runtime>) -> (GtkBox, Rc<dyn F
     container.append(&scrolled);
 
     let st_clone = state.clone();
+    let rt_clone = rt.clone();
     let list_clone = list_box.clone();
+    let status_lbl_clone = status_lbl.clone();
 
     let update_fn: Rc<dyn Fn()> = Rc::new(move || {
         let st = st_clone.clone();
-        let conns = rt.block_on(async { st.collector.poll_connections().await });
-        let alerts = st.rule_engine.write().evaluate_connections(&conns);
+        let rt = rt_clone.clone();
+        let list = list_clone.clone();
+        let stat_lbl = status_lbl_clone.clone();
 
-        for a in &alerts {
-            let _ = st.storage.insert_alert(a);
-        }
+        let (sender, receiver) = async_channel::bounded(1);
+        std::thread::spawn(move || {
+            let conns = rt.block_on(async { st.collector.poll_connections().await });
+            let mut engine = st.rule_engine.write();
+            let alerts = engine.evaluate_connections(&conns);
+            for a in &alerts {
+                let _ = st.storage.insert_alert(a);
+            }
+            let total_indicators = engine.threat_intel().len();
+            let _ = sender.send_blocking((alerts, total_indicators));
+        });
 
-        while let Some(child) = list_clone.first_child() {
-            list_clone.remove(&child);
-        }
+        glib::spawn_future_local(async move {
+            if let Ok((alerts, total_indicators)) = receiver.recv().await {
+                stat_lbl.set_text(&format!(
+                    "Active Indicators: {} | Live threat detection enabled across all network connections.",
+                    total_indicators
+                ));
 
-        if alerts.is_empty() {
-            let row = GtkBox::new(Orientation::Horizontal, 10);
-            row.set_margin_top(12);
-            row.set_margin_bottom(12);
-            row.set_margin_start(16);
-            let lbl = Label::new(Some("No active threat anomalies detected. Host operating securely."));
-            lbl.add_css_class("accent-green");
-            row.append(&lbl);
-            list_clone.append(&row);
-            return;
-        }
+                while let Some(child) = list.first_child() {
+                    list.remove(&child);
+                }
 
-        for alert in alerts {
-            let row = GtkBox::new(Orientation::Vertical, 6);
-            row.set_margin_top(10);
-            row.set_margin_bottom(10);
-            row.set_margin_start(12);
-            row.set_margin_end(12);
+                if alerts.is_empty() {
+                    let row = GtkBox::new(Orientation::Horizontal, 10);
+                    row.set_margin_top(12);
+                    row.set_margin_bottom(12);
+                    row.set_margin_start(16);
+                    let lbl = Label::new(Some(
+                        "No active threat anomalies detected. Host operating securely.",
+                    ));
+                    lbl.add_css_class("accent-green");
+                    row.append(&lbl);
+                    list.append(&row);
+                    return;
+                }
 
-            let header_row = GtkBox::new(Orientation::Horizontal, 10);
-            let sev_badge = Label::new(Some(&alert.severity.to_string()));
-            sev_badge.add_css_class("badge");
-            sev_badge.add_css_class(match alert.severity {
-                netscope_core::AlertSeverity::High | netscope_core::AlertSeverity::Critical => "badge-danger",
-                netscope_core::AlertSeverity::Medium => "badge-warning",
-                _ => "badge-info",
+                for alert in alerts {
+                    let row = GtkBox::new(Orientation::Vertical, 6);
+                    row.set_margin_top(10);
+                    row.set_margin_bottom(10);
+                    row.set_margin_start(12);
+                    row.set_margin_end(12);
+
+                    let header_row = GtkBox::new(Orientation::Horizontal, 10);
+                    let sev_badge = Label::new(Some(&alert.severity.to_string()));
+                    sev_badge.add_css_class("badge");
+                    sev_badge.add_css_class(match alert.severity {
+                        netscope_core::AlertSeverity::High
+                        | netscope_core::AlertSeverity::Critical => "badge-danger",
+                        netscope_core::AlertSeverity::Medium => "badge-warning",
+                        _ => "badge-info",
+                    });
+
+                    let t_lbl = Label::new(Some(&alert.title));
+                    t_lbl.add_css_class("heading-2");
+                    t_lbl.set_halign(gtk4::Align::Start);
+                    t_lbl.set_hexpand(true);
+
+                    let rule_lbl = Label::new(Some(&alert.rule_id));
+                    rule_lbl.add_css_class("dim-label");
+
+                    header_row.append(&sev_badge);
+                    header_row.append(&t_lbl);
+                    header_row.append(&rule_lbl);
+
+                    let msg_lbl = Label::new(Some(&alert.message));
+                    msg_lbl.set_wrap(true);
+                    msg_lbl.set_halign(gtk4::Align::Start);
+
+                    row.append(&header_row);
+                    row.append(&msg_lbl);
+
+                    list.append(&row);
+                }
+            }
+        });
+    });
+
+    let st_for_feed = state.clone();
+    let rt_for_feed = rt.clone();
+    let stat_for_feed = status_lbl.clone();
+    let btn_for_feed = refresh_feeds_btn.clone();
+    let u_feed = update_fn.clone();
+
+    refresh_feeds_btn.connect_clicked(move |_| {
+        btn_for_feed.set_sensitive(false);
+        stat_for_feed.set_text(
+            "Downloading & updating live threat intelligence feeds (abuse.ch & Tor Project)...",
+        );
+        let st = st_for_feed.clone();
+        let rt = rt_for_feed.clone();
+        let btn = btn_for_feed.clone();
+        let stat = stat_for_feed.clone();
+        let u = u_feed.clone();
+
+        let (sender, receiver) = async_channel::bounded(1);
+        std::thread::spawn(move || {
+            let res = rt.block_on(async {
+                let mut pipeline = netscope_security::ThreatPipeline::new();
+                let mut total_added = 0;
+                for provider in ["feodo", "urlhaus", "tor_exits"] {
+                    if let Ok(indicators) = pipeline.fetch_feed_updates(provider).await {
+                        let added = st.rule_engine.write().ingest_indicators(indicators);
+                        total_added += added;
+                    }
+                }
+                total_added
             });
+            let _ = sender.send_blocking(res);
+        });
 
-            let t_lbl = Label::new(Some(&alert.title));
-            t_lbl.add_css_class("heading-2");
-            t_lbl.set_halign(gtk4::Align::Start);
-            t_lbl.set_hexpand(true);
-
-            let rule_lbl = Label::new(Some(&alert.rule_id));
-            rule_lbl.add_css_class("dim-label");
-
-            header_row.append(&sev_badge);
-            header_row.append(&t_lbl);
-            header_row.append(&rule_lbl);
-
-            let msg_lbl = Label::new(Some(&alert.message));
-            msg_lbl.set_wrap(true);
-            msg_lbl.set_halign(gtk4::Align::Start);
-
-            row.append(&header_row);
-            row.append(&msg_lbl);
-
-            list_clone.append(&row);
-        }
+        glib::spawn_future_local(async move {
+            if let Ok(added) = receiver.recv().await {
+                stat.set_text(&format!(
+                    "Threat feed update completed! Added/updated {} indicators.",
+                    added
+                ));
+                btn.set_sensitive(true);
+                u();
+            }
+        });
     });
 
     (container, update_fn)
@@ -1307,7 +1666,9 @@ fn show_command_palette(parent: &ApplicationWindow, stack: &Stack) {
     content.add_css_class("view-container");
 
     let entry = Entry::new();
-    entry.set_placeholder_text(Some("Type a command or jump to page (e.g. connections, speedtest, packets)..."));
+    entry.set_placeholder_text(Some(
+        "Type a command or jump to page (e.g. connections, speedtest, packets)...",
+    ));
     content.append(&entry);
 
     let list = gtk4::ListBox::new();

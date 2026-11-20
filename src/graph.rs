@@ -99,7 +99,11 @@ impl BandwidthWaveform {
             let _ = cr.stroke();
         }
 
-        let max_val = rx.iter().chain(tx.iter()).cloned().fold(100_000.0, f64::max);
+        let max_val = rx
+            .iter()
+            .chain(tx.iter())
+            .cloned()
+            .fold(100_000.0, f64::max);
         let n = rx.len().max(1);
         let step_x = width / (n as f64 - 1.0).max(1.0);
 

@@ -1,7 +1,7 @@
-use chrono::Utc;
-use netscope_core::{BandwidthSample, NetworkConnection, NetworkInterface};
 use crate::connection::ConnectionScanner;
 use crate::interfaces::InterfaceManager;
+use chrono::Utc;
+use netscope_core::{BandwidthSample, NetworkConnection, NetworkInterface};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
@@ -35,7 +35,10 @@ impl NetworkCollector {
         self.collect_bandwidth_sample_for(None).await
     }
 
-    pub async fn collect_bandwidth_sample_for(&self, specific_iface: Option<&str>) -> BandwidthSample {
+    pub async fn collect_bandwidth_sample_for(
+        &self,
+        specific_iface: Option<&str>,
+    ) -> BandwidthSample {
         let interfaces = self.poll_interfaces().await;
         let mut total_rx = 0u64;
         let mut total_tx = 0u64;
@@ -63,7 +66,10 @@ impl NetworkCollector {
         }
 
         if active_iface.is_none() {
-            active_iface = interfaces.iter().find(|i| !i.is_loopback && i.is_up).map(|i| i.name.clone());
+            active_iface = interfaces
+                .iter()
+                .find(|i| !i.is_loopback && i.is_up)
+                .map(|i| i.name.clone());
         }
 
         let sample = BandwidthSample {

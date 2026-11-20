@@ -39,7 +39,11 @@ impl DnsInspector {
         servers
     }
 
-    pub async fn resolve(&self, domain: &str, record_type: &str) -> Result<DnsRecord, anyhow::Error> {
+    pub async fn resolve(
+        &self,
+        domain: &str,
+        record_type: &str,
+    ) -> Result<DnsRecord, anyhow::Error> {
         let start = Instant::now();
         let mut answers = Vec::new();
 
@@ -79,10 +83,18 @@ impl DnsInspector {
 
         let duration = start.elapsed().as_millis() as u64;
         let system_resolvers = Self::get_system_resolvers();
-        let resolver_addr = system_resolvers.first().cloned().unwrap_or_else(|| "System Default".to_string());
+        let resolver_addr = system_resolvers
+            .first()
+            .cloned()
+            .unwrap_or_else(|| "System Default".to_string());
 
         Ok(DnsRecord {
-            id: format!("{}-{}-{}", Utc::now().timestamp_micros(), domain, record_type),
+            id: format!(
+                "{}-{}-{}",
+                Utc::now().timestamp_micros(),
+                domain,
+                record_type
+            ),
             timestamp: Utc::now(),
             query: domain.to_string(),
             qtype: record_type.to_uppercase(),

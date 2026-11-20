@@ -88,11 +88,16 @@ impl InterfaceManager {
     }
 
     fn read_u32(&self, path: &Path) -> Option<u32> {
-        fs::read_to_string(path).ok().and_then(|s| s.trim().parse().ok())
+        fs::read_to_string(path)
+            .ok()
+            .and_then(|s| s.trim().parse().ok())
     }
 
     fn read_mac(&self, path: &Path) -> Option<String> {
-        fs::read_to_string(path).ok().map(|s| s.trim().to_string()).filter(|s| !s.is_empty() && s != "00:00:00:00:00:00")
+        fs::read_to_string(path)
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty() && s != "00:00:00:00:00:00")
     }
 
     fn determine_interface_type(&self, name: &str, path: &Path) -> InterfaceType {
@@ -143,7 +148,10 @@ impl InterfaceManager {
 
     fn calculate_speeds(&mut self, name: &str, current_stats: &InterfaceStats) -> (f64, f64) {
         let now = std::time::Instant::now();
-        if let Some((prev_stats, prev_time)) = self.last_stats.insert(name.to_string(), (current_stats.clone(), now)) {
+        if let Some((prev_stats, prev_time)) = self
+            .last_stats
+            .insert(name.to_string(), (current_stats.clone(), now))
+        {
             let duration = now.duration_since(prev_time).as_secs_f64();
             if duration > 0.05 {
                 let rx_diff = current_stats.rx_bytes.saturating_sub(prev_stats.rx_bytes);
@@ -184,7 +192,7 @@ impl InterfaceManager {
                     if hex_addr.len() == 32 {
                         let mut segments = Vec::new();
                         for i in (0..32).step_by(4) {
-                            segments.push(&hex_addr[i..i+4]);
+                            segments.push(&hex_addr[i..i + 4]);
                         }
                         let formatted = segments.join(":");
                         if let Ok(ip) = formatted.parse::<IpAddr>() {
@@ -197,7 +205,10 @@ impl InterfaceManager {
 
         // Check if there are IPv4 addresses in /proc/net/arp or via simple shell command fallback
         // Or get from /sys if available. A lightweight fallback for IPv4 without external deps:
-        if let Ok(out) = std::process::Command::new("ip").args(["-4", "-brief", "addr", "show", if_name]).output() {
+        if let Ok(out) = std::process::Command::new("ip")
+            .args(["-4", "-brief", "addr", "show", if_name])
+            .output()
+        {
             let s = String::from_utf8_lossy(&out.stdout);
             for part in s.split_whitespace() {
                 if part.contains('/') && part.chars().next().is_some_and(|c| c.is_ascii_digit()) {

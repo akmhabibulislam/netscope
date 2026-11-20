@@ -86,8 +86,9 @@ impl ThreatIntel {
                     ThreatEntry {
                         ip,
                         category: "Tor Anonymization Relay".to_string(),
-                        description: "Public Tor exit node routing privacy-preserving or redirected traffic."
-                            .to_string(),
+                        description:
+                            "Public Tor exit node routing privacy-preserving or redirected traffic."
+                                .to_string(),
                         source: source.to_string(),
                         confidence: 90,
                         first_seen: now,
@@ -99,10 +100,26 @@ impl ThreatIntel {
 
         // Active Threat Probes (Documented CINS Army & AbuseIPDB high-frequency bot scanners)
         let malicious_scanners = [
-            ("185.180.143.11", "CINS Army Threat Feed", "Automated mass port scanner & SSH probe"),
-            ("45.154.255.88", "Feodo Tracker / AbuseIPDB", "Botnet C2 payload delivery probe"),
-            ("194.26.29.114", "Spamhaus DROP / Shadowserver", "Brute-force credential scanner"),
-            ("193.163.125.10", "AlienVault OTX", "Active exploit scanner and vulnerability probe"),
+            (
+                "185.180.143.11",
+                "CINS Army Threat Feed",
+                "Automated mass port scanner & SSH probe",
+            ),
+            (
+                "45.154.255.88",
+                "Feodo Tracker / AbuseIPDB",
+                "Botnet C2 payload delivery probe",
+            ),
+            (
+                "194.26.29.114",
+                "Spamhaus DROP / Shadowserver",
+                "Brute-force credential scanner",
+            ),
+            (
+                "193.163.125.10",
+                "AlienVault OTX",
+                "Active exploit scanner and vulnerability probe",
+            ),
         ];
 
         for (ip_str, source, desc) in malicious_scanners {
@@ -131,7 +148,11 @@ impl ThreatIntel {
 
         if let Ok(content) = fs::read_to_string(&self.storage_path) {
             if let Ok(feed) = serde_json::from_str::<ThreatFeedFile>(&content) {
-                info!("Loaded {} threat indicators from local cache: {:?}", feed.entries.len(), self.storage_path);
+                info!(
+                    "Loaded {} threat indicators from local cache: {:?}",
+                    feed.entries.len(),
+                    self.storage_path
+                );
                 for entry in feed.entries {
                     self.feed_entries.insert(entry.ip, entry);
                 }
@@ -154,15 +175,14 @@ impl ThreatIntel {
 
         let json = serde_json::to_string_pretty(&feed)
             .map_err(|e| format!("Serialization error: {}", e))?;
-        fs::write(&self.storage_path, json)
-            .map_err(|e| format!("Disk write error: {}", e))?;
+        fs::write(&self.storage_path, json).map_err(|e| format!("Disk write error: {}", e))?;
         Ok(())
     }
 
     /// Imports a threat intelligence feed from JSON file
     pub fn import_feed_file(&mut self, path: &Path) -> Result<usize, String> {
-        let content = fs::read_to_string(path)
-            .map_err(|e| format!("Cannot read threat file: {}", e))?;
+        let content =
+            fs::read_to_string(path).map_err(|e| format!("Cannot read threat file: {}", e))?;
         let feed: ThreatFeedFile = serde_json::from_str(&content)
             .map_err(|e| format!("Invalid threat feed schema: {}", e))?;
 
@@ -245,8 +265,12 @@ mod tests {
     #[test]
     fn test_documentation_ips_not_flagged() {
         let intel = ThreatIntel::new();
-        assert!(intel.check_ip(IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1))).is_none());
-        assert!(intel.check_ip(IpAddr::V4(Ipv4Addr::new(198, 51, 100, 23))).is_none());
+        assert!(intel
+            .check_ip(IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1)))
+            .is_none());
+        assert!(intel
+            .check_ip(IpAddr::V4(Ipv4Addr::new(198, 51, 100, 23)))
+            .is_none());
     }
 
     #[test]
@@ -280,7 +304,9 @@ mod tests {
             expires_at: Some(Utc::now() + chrono::Duration::days(10)),
         });
 
-        let m = intel.check_ip(test_ip).expect("Must match active indicator");
+        let m = intel
+            .check_ip(test_ip)
+            .expect("Must match active indicator");
         assert_eq!(m.confidence, 95);
         assert_eq!(m.threat_type, "Active Botnet Probe");
     }

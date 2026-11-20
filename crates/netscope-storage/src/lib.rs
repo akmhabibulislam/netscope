@@ -1,5 +1,7 @@
 use chrono::{DateTime, Utc};
-use netscope_core::{AlertSeverity, BandwidthSample, DnsRecord, NetworkEvent, SecurityAlert, TimelineEventType};
+use netscope_core::{
+    AlertSeverity, BandwidthSample, DnsRecord, NetworkEvent, SecurityAlert, TimelineEventType,
+};
 use rusqlite::{params, Connection};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -30,7 +32,7 @@ impl StorageManager {
         conn.execute_batch(
             "PRAGMA journal_mode = WAL;
              PRAGMA synchronous = NORMAL;
-             PRAGMA busy_timeout = 5000;"
+             PRAGMA busy_timeout = 5000;",
         )?;
 
         let manager = Self {
@@ -308,7 +310,18 @@ impl StorageManager {
     pub fn export_alerts_csv(&self) -> Result<String, anyhow::Error> {
         let alerts = self.get_recent_alerts(1000)?;
         let mut wtr = csv::Writer::from_writer(vec![]);
-        wtr.write_record(["ID", "Timestamp", "Severity", "Title", "Message", "Rule", "Process", "Remote IP", "Remote Port", "Reviewed"])?;
+        wtr.write_record([
+            "ID",
+            "Timestamp",
+            "Severity",
+            "Title",
+            "Message",
+            "Rule",
+            "Process",
+            "Remote IP",
+            "Remote Port",
+            "Reviewed",
+        ])?;
         for a in alerts {
             wtr.write_record(&[
                 a.id,
@@ -334,17 +347,29 @@ impl StorageManager {
         let mut html = String::from("<!DOCTYPE html><html><head><meta charset='utf-8'><title>NetScope Investigation Report</title>");
         html.push_str("<style>body{background:#0B0D11;color:#F0F3F8;font-family:sans-serif;padding:30px;} table{width:100%;border-collapse:collapse;margin-top:15px;} th,td{border:1px solid #1E2330;padding:8px 12px;text-align:left;} th{background:#12151C;color:#9AA3B5;} tr:nth-child(even){background:#12151C;}</style></head><body>");
         html.push_str("<h1>NetScope 2.0 Security & Forensic Investigation Report</h1>");
-        html.push_str(&format!("<p>Generated at: {} UTC</p>", Utc::now().to_rfc3339()));
-        
+        html.push_str(&format!(
+            "<p>Generated at: {} UTC</p>",
+            Utc::now().to_rfc3339()
+        ));
+
         html.push_str("<h2>Recent Security Alerts</h2><table><tr><th>Severity</th><th>Rule</th><th>Title</th><th>Message</th></tr>");
         for a in alerts {
-            html.push_str(&format!("<tr><td>{}</td><td>{}</td><td>{}</td><td>{}</td></tr>", a.severity, a.rule_id, a.title, a.message));
+            html.push_str(&format!(
+                "<tr><td>{}</td><td>{}</td><td>{}</td><td>{}</td></tr>",
+                a.severity, a.rule_id, a.title, a.message
+            ));
         }
         html.push_str("</table>");
 
         html.push_str("<h2>Network Event Timeline</h2><table><tr><th>Time</th><th>Type</th><th>Title</th><th>Details</th></tr>");
         for e in events {
-            html.push_str(&format!("<tr><td>{}</td><td>{}</td><td>{}</td><td>{}</td></tr>", e.timestamp.format("%H:%M:%S"), e.event_type, e.title, e.details));
+            html.push_str(&format!(
+                "<tr><td>{}</td><td>{}</td><td>{}</td><td>{}</td></tr>",
+                e.timestamp.format("%H:%M:%S"),
+                e.event_type,
+                e.title,
+                e.details
+            ));
         }
         html.push_str("</table></body></html>");
 

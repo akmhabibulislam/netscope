@@ -2,7 +2,11 @@ use clap::{Parser, Subcommand};
 use comfy_table::{presets::UTF8_FULL, Cell, Color, Table};
 use netscope_core::Protocol;
 use netscope_dns::DnsInspector;
-use netscope_network::{collector::NetworkCollector, diagnostics::DiagnosticsEngine, firewall::NetworkFirewall, investigation::Investigator, sniffer::LiveTrafficSniffer, speedtest::SpeedTestEngine, wifi::WifiScanner};
+use netscope_network::{
+    collector::NetworkCollector, diagnostics::DiagnosticsEngine, firewall::NetworkFirewall,
+    investigation::Investigator, sniffer::LiveTrafficSniffer, speedtest::SpeedTestEngine,
+    wifi::WifiScanner,
+};
 use netscope_security::SecurityRuleEngine;
 use netscope_storage::StorageManager;
 
@@ -60,13 +64,16 @@ enum Commands {
     /// Run speed and throughput benchmark test
     Speedtest,
     /// Forensically investigate an IP address or hostname
-    Investigate {
-        target: String,
-    },
+    Investigate { target: String },
     /// Monitor live inbound & outbound raw network packets in real-time
     Sniff {
         #[arg(short, long, default_value_t = 15)]
         count: usize,
+    },
+    /// Inspect active bidirectional network flows and session conversations
+    Flows {
+        #[arg(short, long, default_value_t = 3)]
+        duration_secs: u64,
     },
     /// Terminate an active TCP connection (requires privileges)
     Kill {
@@ -97,10 +104,18 @@ async fn main() -> Result<(), anyhow::Error> {
             table.load_preset(UTF8_FULL);
             table.set_header(vec!["Property", "Value"]);
 
-            let active_if = sample.active_interface.unwrap_or_else(|| "None".to_string());
+            let active_if = sample
+                .active_interface
+                .unwrap_or_else(|| "None".to_string());
             table.add_row(vec!["Active Interface", &active_if]);
-            table.add_row(vec!["Current Download Speed", &format!("{:.2} Kbps", sample.rx_speed_bps / 1000.0)]);
-            table.add_row(vec!["Current Upload Speed", &format!("{:.2} Kbps", sample.tx_speed_bps / 1000.0)]);
+            table.add_row(vec![
+                "Current Download Speed",
+                &format!("{:.2} Kbps", sample.rx_speed_bps / 1000.0),
+            ]);
+            table.add_row(vec![
+                "Current Upload Speed",
+                &format!("{:.2} Kbps", sample.tx_speed_bps / 1000.0),
+            ]);
             table.add_row(vec!["Total Detected Interfaces", &ifaces.len().to_string()]);
 
             let conns = collector.poll_connections().await;
@@ -115,16 +130,32 @@ async fn main() -> Result<(), anyhow::Error> {
             let ifaces = collector.poll_interfaces().await;
             let mut table = Table::new();
             table.load_preset(UTF8_FULL);
-            table.set_header(vec!["Interface", "Type", "State", "MAC", "IPv4", "Rx (Bytes)", "Tx (Bytes)"]);
+            table.set_header(vec![
+                "Interface",
+                "Type",
+                "State",
+                "MAC",
+                "IPv4",
+                "Rx (Bytes)",
+                "Tx (Bytes)",
+            ]);
 
             for iface in ifaces {
                 let ipv4 = iface.ipv4_addresses.join(", ");
                 table.add_row(vec![
                     Cell::new(iface.name),
                     Cell::new(iface.if_type.to_string()),
-                    Cell::new(iface.oper_state.to_string()).fg(if iface.is_up { Color::Green } else { Color::Red }),
+                    Cell::new(iface.oper_state.to_string()).fg(if iface.is_up {
+                        Color::Green
+                    } else {
+                        Color::Red
+                    }),
                     Cell::new(iface.mac_address.unwrap_or_else(|| "-".to_string())),
-                    Cell::new(if ipv4.is_empty() { "-".to_string() } else { ipv4 }),
+                    Cell::new(if ipv4.is_empty() {
+                        "-".to_string()
+                    } else {
+                        ipv4
+                    }),
                     Cell::new(iface.stats.rx_bytes.to_string()),
                     Cell::new(iface.stats.tx_bytes.to_string()),
                 ]);
@@ -133,11 +164,16 @@ async fn main() -> Result<(), anyhow::Error> {
         }
         Commands::Traffic { interface } => {
             let iface_desc = interface.as_deref().unwrap_or("all active interfaces");
-            println!("Monitoring live bandwidth on {} (Press Ctrl+C to stop)...", iface_desc);
-            
+            println!(
+                "Monitoring live bandwidth on {} (Press Ctrl+C to stop)...",
+                iface_desc
+            );
+
             loop {
                 tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
-                let sample = collector.collect_bandwidth_sample_for(interface.as_deref()).await;
+                let sample = collector
+                    .collect_bandwidth_sample_for(interface.as_deref())
+                    .await;
                 println!(
                     "[{}] Rx: {:.2} Kbps | Tx: {:.2} Kbps | Total Rx: {} KB | Total Tx: {} KB",
                     sample.active_interface.as_deref().unwrap_or("any"),
@@ -148,7 +184,10 @@ async fn main() -> Result<(), anyhow::Error> {
                 );
             }
         }
-        Commands::Connections { protocol, established_only } => {
+        Commands::Connections {
+            protocol,
+            established_only,
+        } => {
             let mut conns = collector.poll_connections().await;
             if let Some(proto) = protocol {
                 conns.retain(|c| c.protocol.to_string().eq_ignore_ascii_case(&proto));
@@ -159,7 +198,14 @@ async fn main() -> Result<(), anyhow::Error> {
 
             let mut table = Table::new();
             table.load_preset(UTF8_FULL);
-            table.set_header(vec!["Proto", "Local Address", "Remote Address", "State", "PID", "Process"]);
+            table.set_header(vec![
+                "Proto",
+                "Local Address",
+                "Remote Address",
+                "State",
+                "PID",
+                "Process",
+            ]);
 
             for conn in conns.iter().take(50) {
                 let (pid, proc_name) = match &conn.process {
@@ -183,7 +229,8 @@ async fn main() -> Result<(), anyhow::Error> {
         }
         Commands::Processes => {
             let conns = collector.poll_connections().await;
-            let mut proc_map: std::collections::HashMap<String, (u32, usize, Vec<Protocol>)> = std::collections::HashMap::new();
+            let mut proc_map: std::collections::HashMap<String, (u32, usize, Vec<Protocol>)> =
+                std::collections::HashMap::new();
 
             for conn in conns {
                 if let Some(p) = conn.process {
@@ -200,7 +247,11 @@ async fn main() -> Result<(), anyhow::Error> {
             table.set_header(vec!["PID", "Process Name", "Active Sockets", "Protocols"]);
 
             for (name, (pid, count, protos)) in proc_map {
-                let proto_str = protos.iter().map(|p| p.to_string()).collect::<Vec<_>>().join(", ");
+                let proto_str = protos
+                    .iter()
+                    .map(|p| p.to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ");
                 table.add_row(vec![
                     Cell::new(pid.to_string()),
                     Cell::new(name),
@@ -218,7 +269,10 @@ async fn main() -> Result<(), anyhow::Error> {
                     Ok(rec) => {
                         println!("Resolver: {}", rec.resolver);
                         println!("Duration: {} ms", rec.duration_ms.unwrap_or(0));
-                        println!("Response: {}", rec.response.unwrap_or_else(|| "None".to_string()));
+                        println!(
+                            "Response: {}",
+                            rec.response.unwrap_or_else(|| "None".to_string())
+                        );
                     }
                     Err(e) => println!("DNS Lookup failed: {}", e),
                 }
@@ -227,23 +281,44 @@ async fn main() -> Result<(), anyhow::Error> {
                 println!("Configured DNS Resolvers: {}", resolvers.join(", "));
             }
         }
-        Commands::Diagnostics { ping, tcp, port, routes } => {
+        Commands::Diagnostics {
+            ping,
+            tcp,
+            port,
+            routes,
+        } => {
             if let Some(target) = ping {
                 println!("Pinging {}...", target);
                 match DiagnosticsEngine::ping_host(&target, 4) {
                     Ok(res) => {
-                        println!("Transmitted: {}, Received: {}, Loss: {}%", res.transmitted, res.received, res.packet_loss_percent);
-                        if let (Some(min), Some(avg), Some(max)) = (res.min_latency_ms, res.avg_latency_ms, res.max_latency_ms) {
-                            println!("Min/Avg/Max Latency: {:.2} / {:.2} / {:.2} ms", min, avg, max);
+                        println!(
+                            "Transmitted: {}, Received: {}, Loss: {}%",
+                            res.transmitted, res.received, res.packet_loss_percent
+                        );
+                        if let (Some(min), Some(avg), Some(max)) =
+                            (res.min_latency_ms, res.avg_latency_ms, res.max_latency_ms)
+                        {
+                            println!(
+                                "Min/Avg/Max Latency: {:.2} / {:.2} / {:.2} ms",
+                                min, avg, max
+                            );
                         }
                     }
                     Err(e) => println!("Ping error: {}", e),
                 }
             } else if let Some(target) = tcp {
                 println!("Testing TCP connectivity to {}:{}...", target, port);
-                let res = DiagnosticsEngine::test_tcp_port(&target, port, std::time::Duration::from_secs(3)).await;
+                let res = DiagnosticsEngine::test_tcp_port(
+                    &target,
+                    port,
+                    std::time::Duration::from_secs(3),
+                )
+                .await;
                 if res.is_reachable {
-                    println!("Reachable! Latency: {:.2} ms", res.latency_ms.unwrap_or(0.0));
+                    println!(
+                        "Reachable! Latency: {:.2} ms",
+                        res.latency_ms.unwrap_or(0.0)
+                    );
                 } else {
                     println!("Failed: {}", res.error.unwrap_or_default());
                 }
@@ -253,7 +328,13 @@ async fn main() -> Result<(), anyhow::Error> {
                 table.load_preset(UTF8_FULL);
                 table.set_header(vec!["Destination", "Gateway", "Genmask", "Flags", "Iface"]);
                 for r in rts {
-                    table.add_row(vec![r.destination, r.gateway, r.genmask, r.flags, r.interface]);
+                    table.add_row(vec![
+                        r.destination,
+                        r.gateway,
+                        r.genmask,
+                        r.flags,
+                        r.interface,
+                    ]);
                 }
                 println!("{table}");
             } else {
@@ -281,22 +362,51 @@ async fn main() -> Result<(), anyhow::Error> {
         }
         Commands::Wifi => {
             let ifaces = collector.poll_interfaces().await;
-            let wifi_iface = ifaces.iter().find(|i| i.if_type == netscope_core::InterfaceType::WiFi || i.name.starts_with("wl"));
+            let wifi_iface = ifaces.iter().find(|i| {
+                i.if_type == netscope_core::InterfaceType::WiFi || i.name.starts_with("wl")
+            });
             if let Some(iface) = wifi_iface {
                 if let Some(details) = WifiScanner::get_wifi_details(&iface.name) {
                     let mut table = Table::new();
                     table.load_preset(UTF8_FULL);
                     table.set_header(vec!["Parameter", "Value"]);
                     table.add_row(vec!["Interface", &details.interface]);
-                    table.add_row(vec!["SSID", &details.ssid.unwrap_or_else(|| "N/A".to_string())]);
-                    table.add_row(vec!["BSSID", &details.bssid.unwrap_or_else(|| "N/A".to_string())]);
-                    table.add_row(vec!["Signal RSSI", &format!("{} dBm", details.signal_dbm.map(|s| s.to_string()).unwrap_or_else(|| "-".to_string()))]);
-                    table.add_row(vec!["Link Quality", &details.link_quality.unwrap_or_else(|| "-".to_string())]);
-                    table.add_row(vec!["Frequency", &format!("{:.3} GHz", details.frequency_ghz.unwrap_or(0.0))]);
-                    table.add_row(vec!["Bitrate", &format!("{:.1} Mbps", details.tx_bitrate_mbps.unwrap_or(0.0))]);
+                    table.add_row(vec![
+                        "SSID",
+                        &details.ssid.unwrap_or_else(|| "N/A".to_string()),
+                    ]);
+                    table.add_row(vec![
+                        "BSSID",
+                        &details.bssid.unwrap_or_else(|| "N/A".to_string()),
+                    ]);
+                    table.add_row(vec![
+                        "Signal RSSI",
+                        &format!(
+                            "{} dBm",
+                            details
+                                .signal_dbm
+                                .map(|s| s.to_string())
+                                .unwrap_or_else(|| "-".to_string())
+                        ),
+                    ]);
+                    table.add_row(vec![
+                        "Link Quality",
+                        &details.link_quality.unwrap_or_else(|| "-".to_string()),
+                    ]);
+                    table.add_row(vec![
+                        "Frequency",
+                        &format!("{:.3} GHz", details.frequency_ghz.unwrap_or(0.0)),
+                    ]);
+                    table.add_row(vec![
+                        "Bitrate",
+                        &format!("{:.1} Mbps", details.tx_bitrate_mbps.unwrap_or(0.0)),
+                    ]);
                     println!("{table}");
                 } else {
-                    println!("Wi-Fi interface {} is not connected or unassociated", iface.name);
+                    println!(
+                        "Wi-Fi interface {} is not connected or unassociated",
+                        iface.name
+                    );
                 }
             } else {
                 println!("No Wi-Fi interface detected on this machine");
@@ -312,8 +422,14 @@ async fn main() -> Result<(), anyhow::Error> {
                     table.add_row(vec!["Target Server", &bench.server]);
                     table.add_row(vec!["Ping Latency", &format!("{:.2} ms", bench.latency_ms)]);
                     table.add_row(vec!["Jitter", &format!("{:.2} ms", bench.jitter_ms)]);
-                    table.add_row(vec!["Download Throughput", &format!("{:.2} Mbps", bench.download_mbps)]);
-                    table.add_row(vec!["Upload Throughput", &format!("{:.2} Mbps", bench.upload_mbps)]);
+                    table.add_row(vec![
+                        "Download Throughput",
+                        &format!("{:.2} Mbps", bench.download_mbps),
+                    ]);
+                    table.add_row(vec![
+                        "Upload Throughput",
+                        &format!("{:.2} Mbps", bench.upload_mbps),
+                    ]);
                     println!("{table}");
                 }
                 Err(e) => println!("Benchmark error: {}", e),
@@ -326,16 +442,35 @@ async fn main() -> Result<(), anyhow::Error> {
             table.load_preset(UTF8_FULL);
             table.set_header(vec!["Property", "Details"]);
             table.add_row(vec!["Target Query", &rep.query]);
-            table.add_row(vec!["Classification", if rep.is_private { "Private (RFC 1918)" } else { "Public Internet Target" }]);
+            table.add_row(vec![
+                "Classification",
+                if rep.is_private {
+                    "Private (RFC 1918)"
+                } else {
+                    "Public Internet Target"
+                },
+            ]);
             table.add_row(vec!["Reputation", &rep.reputation_score]);
             table.add_row(vec!["Resolved IPs", &rep.resolved_ips.join(", ")]);
-            table.add_row(vec!["Reverse DNS", &rep.reverse_dns.unwrap_or_else(|| "None".to_string())]);
-            table.add_row(vec!["Network ASN / Org", &rep.asn.unwrap_or_else(|| "Local Subnet".to_string())]);
-            table.add_row(vec!["Country / Transit", &rep.country.unwrap_or_else(|| "Local".to_string())]);
+            table.add_row(vec![
+                "Reverse DNS",
+                &rep.reverse_dns.unwrap_or_else(|| "None".to_string()),
+            ]);
+            table.add_row(vec![
+                "Network ASN / Org",
+                &rep.asn.unwrap_or_else(|| "Local Subnet".to_string()),
+            ]);
+            table.add_row(vec![
+                "Country / Transit",
+                &rep.country.unwrap_or_else(|| "Local".to_string()),
+            ]);
             println!("{table}");
         }
         Commands::Sniff { count } => {
-            println!("Starting live packet sniffer stream (target: {} packets, Ctrl+C to cancel)...", count);
+            println!(
+                "Starting live packet sniffer stream (target: {} packets, Ctrl+C to cancel)...",
+                count
+            );
             let sniffer = LiveTrafficSniffer::new();
             if let Err(e) = sniffer.start_capture() {
                 println!("Error initializing sniffer: {}", e);
@@ -367,7 +502,14 @@ async fn main() -> Result<(), anyhow::Error> {
 
             let mut table = Table::new();
             table.load_preset(UTF8_FULL);
-            table.set_header(vec!["Dir", "Proto", "Source", "Destination", "Bytes", "Summary"]);
+            table.set_header(vec![
+                "Dir",
+                "Proto",
+                "Source",
+                "Destination",
+                "Bytes",
+                "Summary",
+            ]);
 
             for p in captured {
                 let dir_cell = Cell::new(p.direction.to_string()).fg(match p.direction {
@@ -386,6 +528,69 @@ async fn main() -> Result<(), anyhow::Error> {
             }
             println!("{table}");
             sniffer.stop_capture();
+        }
+        Commands::Flows { duration_secs } => {
+            println!(
+                "Monitoring live packets and aggregating session flows for {} seconds...",
+                duration_secs
+            );
+            let sniffer = LiveTrafficSniffer::new();
+            if let Err(e) = sniffer.start_capture() {
+                println!("Error initializing sniffer: {}", e);
+                return Ok(());
+            }
+
+            tokio::time::sleep(std::time::Duration::from_secs(duration_secs)).await;
+
+            if !sniffer.has_raw_permission() {
+                println!("\n[!] AF_PACKET raw socket permission denied: CAP_NET_RAW capability required.");
+                println!("    Grant capability via: sudo setcap cap_net_raw,cap_net_admin+eip $(which netscope-cli)");
+                println!("    No fake or simulated flows generated.\n");
+                return Ok(());
+            }
+
+            let flows = sniffer.get_active_flows();
+            sniffer.stop_capture();
+
+            if flows.is_empty() {
+                println!("No active conversations/flows recorded during observation window.");
+                return Ok(());
+            }
+
+            let mut table = Table::new();
+            table.load_preset(UTF8_FULL);
+            table.set_header(vec![
+                "Proto",
+                "State",
+                "Endpoint A",
+                "⇄",
+                "Endpoint B",
+                "Bytes",
+                "Packets",
+                "Duration",
+            ]);
+
+            for f in flows {
+                let state_color = match f.state {
+                    netscope_core::FlowState::Established => Color::Green,
+                    netscope_core::FlowState::Closing | netscope_core::FlowState::Closed => {
+                        Color::Yellow
+                    }
+                    _ => Color::Blue,
+                };
+
+                table.add_row(vec![
+                    Cell::new(f.key.protocol.to_string()),
+                    Cell::new(f.state.to_string()).fg(state_color),
+                    Cell::new(format!("{}:{}", f.key.endpoint_a.0, f.key.endpoint_a.1)),
+                    Cell::new("⇄"),
+                    Cell::new(format!("{}:{}", f.key.endpoint_b.0, f.key.endpoint_b.1)),
+                    Cell::new(format!("{:.1} KB", f.total_bytes() as f64 / 1024.0)),
+                    Cell::new(f.total_packets().to_string()),
+                    Cell::new(format!("{}s", f.duration_seconds())),
+                ]);
+            }
+            println!("{table}");
         }
         Commands::Kill { src, dst } => {
             println!("Attempting socket drop for {} -> {}...", src, dst);

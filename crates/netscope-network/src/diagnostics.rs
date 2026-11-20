@@ -101,10 +101,17 @@ impl DiagnosticsEngine {
                         }
                     }
                 }
-            } else if line.contains("rtt min/avg/max/mdev") || line.contains("round-trip min/avg/max/stddev") {
+            } else if line.contains("rtt min/avg/max/mdev")
+                || line.contains("round-trip min/avg/max/stddev")
+            {
                 // e.g. "rtt min/avg/max/mdev = 12.345/14.567/18.901/2.123 ms"
                 if let Some(stats_part) = line.split('=').nth(1) {
-                    let vals: Vec<&str> = stats_part.split_whitespace().next().unwrap_or("").split('/').collect();
+                    let vals: Vec<&str> = stats_part
+                        .split_whitespace()
+                        .next()
+                        .unwrap_or("")
+                        .split('/')
+                        .collect();
                     if vals.len() >= 3 {
                         min_lat = vals[0].parse::<f64>().ok();
                         avg_lat = vals[1].parse::<f64>().ok();
@@ -139,7 +146,8 @@ impl DiagnosticsEngine {
 
                     let dest = Self::hex_to_ipv4(dest_hex).unwrap_or_else(|| "0.0.0.0".to_string());
                     let gw = Self::hex_to_ipv4(gw_hex).unwrap_or_else(|| "0.0.0.0".to_string());
-                    let mask = Self::hex_to_ipv4(mask_hex).unwrap_or_else(|| "255.255.255.255".to_string());
+                    let mask = Self::hex_to_ipv4(mask_hex)
+                        .unwrap_or_else(|| "255.255.255.255".to_string());
 
                     routes.push(RouteEntry {
                         destination: dest,
@@ -157,6 +165,9 @@ impl DiagnosticsEngine {
     fn hex_to_ipv4(hex_str: &str) -> Option<String> {
         let num = u32::from_str_radix(hex_str, 16).ok()?;
         let octets = num.to_ne_bytes();
-        Some(format!("{}.{}.{}.{}", octets[0], octets[1], octets[2], octets[3]))
+        Some(format!(
+            "{}.{}.{}.{}",
+            octets[0], octets[1], octets[2], octets[3]
+        ))
     }
 }

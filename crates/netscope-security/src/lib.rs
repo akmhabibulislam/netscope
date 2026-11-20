@@ -1,12 +1,14 @@
-pub mod threat_intel;
 pub mod pipeline;
+pub mod threat_intel;
 
 use chrono::Utc;
-use netscope_core::{AlertSeverity, BandwidthSample, ConnectionState, NetworkConnection, SecurityAlert};
+use netscope_core::{
+    AlertSeverity, BandwidthSample, ConnectionState, NetworkConnection, SecurityAlert,
+};
+pub use pipeline::{FeedProvider, ThreatIndicator, ThreatPipeline};
 use std::collections::{HashMap, HashSet};
 use std::net::IpAddr;
-pub use pipeline::{FeedProvider, ThreatIndicator, ThreatPipeline};
-pub use threat_intel::ThreatIntel;
+pub use threat_intel::{ThreatEntry, ThreatIntel, ThreatMatch};
 
 pub struct SecurityRuleEngine {
     whitelisted_ips: HashSet<String>,
@@ -29,7 +31,10 @@ impl SecurityRuleEngine {
         }
     }
 
-    pub fn evaluate_connections(&mut self, connections: &[NetworkConnection]) -> Vec<SecurityAlert> {
+    pub fn evaluate_connections(
+        &mut self,
+        connections: &[NetworkConnection],
+    ) -> Vec<SecurityAlert> {
         let mut alerts = Vec::new();
         let now = Utc::now();
 
@@ -37,14 +42,23 @@ impl SecurityRuleEngine {
         self.process_connection_counts.clear();
 
         for conn in connections {
-            let proc_name = conn.process.as_ref().map(|p| p.name.clone()).unwrap_or_else(|| "Unknown".to_string());
+            let proc_name = conn
+                .process
+                .as_ref()
+                .map(|p| p.name.clone())
+                .unwrap_or_else(|| "Unknown".to_string());
             let remote_ip_str = conn.remote_addr.to_string();
 
             // Track connections per process
-            *self.process_connection_counts.entry(proc_name.clone()).or_insert(0) += 1;
+            *self
+                .process_connection_counts
+                .entry(proc_name.clone())
+                .or_insert(0) += 1;
 
             // Whitelist skip
-            if self.whitelisted_ips.contains(&remote_ip_str) || self.whitelisted_processes.contains(&proc_name) {
+            if self.whitelisted_ips.contains(&remote_ip_str)
+                || self.whitelisted_processes.contains(&proc_name)
+            {
                 continue;
             }
 
@@ -55,7 +69,10 @@ impl SecurityRuleEngine {
                     timestamp: now,
                     severity: AlertSeverity::Critical,
                     title: format!("Known Threat Detected: {}", matched.threat_type),
-                    message: format!("Process '{}' connected to {}: {}. (Source: {})", proc_name, matched.ip, matched.description, matched.source),
+                    message: format!(
+                        "Process '{}' connected to {}: {}. (Source: {})",
+                        proc_name, matched.ip, matched.description, matched.source
+                    ),
                     rule_id: "RULE_THREAT_INTEL".to_string(),
                     affected_process: Some(proc_name.clone()),
                     remote_ip: Some(conn.remote_addr),
@@ -70,7 +87,9 @@ impl SecurityRuleEngine {
             }
 
             // Rule 1: Unexpected Listening Ports on public interfaces (0.0.0.0 or ::)
-            if conn.state == ConnectionState::Listen && (conn.local_addr.is_unspecified() || !conn.local_addr.is_loopback()) {
+            if conn.state == ConnectionState::Listen
+                && (conn.local_addr.is_unspecified() || !conn.local_addr.is_loopback())
+            {
                 // High risk ports (e.g. 22 SSH, 23 Telnet, 4444 Metasploit, 8080/8888, 3389 RDP, 5900 VNC)
                 let suspicious_ports = [23, 4444, 5555, 6667, 31337];
                 if suspicious_ports.contains(&conn.local_port) {
@@ -120,7 +139,10 @@ impl SecurityRuleEngine {
             }
 
             // Rule 3: Newly observed network process
-            if !self.seen_processes.is_empty() && !self.seen_processes.contains(&proc_name) && proc_name != "Unknown" {
+            if !self.seen_processes.is_empty()
+                && !self.seen_processes.contains(&proc_name)
+                && proc_name != "Unknown"
+            {
                 alerts.push(SecurityAlert {
                     id: format!("ALERT-NEWPROC-{}-{}", proc_name, now.timestamp()),
                     timestamp: now,
@@ -152,13 +174,17 @@ impl SecurityRuleEngine {
                     timestamp: now,
                     severity: AlertSeverity::Medium,
                     title: format!("High Connection Count for {}", proc),
-                    message: format!("Process '{}' has {} active network sockets open simultaneously.", proc, count),
+                    message: format!(
+                        "Process '{}' has {} active network sockets open simultaneously.",
+                        proc, count
+                    ),
                     rule_id: "RULE_HIGH_SOCKETS".to_string(),
                     affected_process: Some(proc.clone()),
                     remote_ip: None,
                     remote_port: None,
                     recommendations: vec![
-                        "Check if this process is a P2P client, browser, or scanning tool".to_string(),
+                        "Check if this process is a P2P client, browser, or scanning tool"
+                            .to_string(),
                         "Examine open socket states in the Connections tab".to_string(),
                     ],
                     reviewed: false,
@@ -195,5 +221,33 @@ impl SecurityRuleEngine {
             });
         }
         None
+    }
+
+    pub fn threat_intel(&self) -> &ThreatIntel {
+        &self.threat_intel
+    }
+
+    pub fn threat_intel_mut(&mut self) -> &mut ThreatIntel {
+        &mut self.threat_intel
+    }
+
+    pub fn ingest_indicators(&mut self, indicators: Vec<ThreatIndicator>) -> usize {
+        let mut count = 0;
+        for ind in indicators {
+            if let Ok(ip) = std::str::FromStr::from_str(&ind.indicator) {
+                self.threat_intel.add_ioc(ThreatEntry {
+                    ip,
+                    category: ind.category,
+                    description: format!("Automated feed ingestion from {}", ind.source),
+                    source: ind.source,
+                    confidence: ind.confidence,
+                    first_seen: ind.first_seen,
+                    expires_at: ind.expires_at,
+                });
+                count += 1;
+            }
+        }
+        let _ = self.threat_intel.save_to_disk();
+        count
     }
 }

@@ -53,7 +53,13 @@ pub struct CanonicalFlowKey {
 }
 
 impl CanonicalFlowKey {
-    pub fn new(src_ip: IpAddr, src_port: u16, dst_ip: IpAddr, dst_port: u16, protocol: FlowProtocol) -> (Self, bool) {
+    pub fn new(
+        src_ip: IpAddr,
+        src_port: u16,
+        dst_ip: IpAddr,
+        dst_port: u16,
+        protocol: FlowProtocol,
+    ) -> (Self, bool) {
         let ep1 = (src_ip, src_port);
         let ep2 = (dst_ip, dst_port);
 
@@ -129,7 +135,8 @@ impl NetworkFlow {
                 self.state = FlowState::Closed;
             } else if flags & 0x01 != 0 {
                 self.state = FlowState::Closing;
-            } else if (flags & 0x12) == 0x12 || (self.packets_a_to_b > 1 && self.packets_b_to_a > 1) {
+            } else if (flags & 0x12) == 0x12 || (self.packets_a_to_b > 1 && self.packets_b_to_a > 1)
+            {
                 self.state = FlowState::Established;
             }
         } else if self.packets_a_to_b > 0 && self.packets_b_to_a > 0 {
@@ -187,7 +194,9 @@ impl FlowTracker {
                 self.cleanup_expired();
                 if self.flows.len() >= self.max_flows {
                     // Evict oldest flow
-                    if let Some(oldest_key) = self.flows.iter()
+                    if let Some(oldest_key) = self
+                        .flows
+                        .iter()
                         .min_by_key(|(_, f)| f.last_seen)
                         .map(|(k, _)| k.clone())
                     {
@@ -195,7 +204,8 @@ impl FlowTracker {
                     }
                 }
             }
-            self.flows.insert(key.clone(), NetworkFlow::new(key, length_bytes, is_forward));
+            self.flows
+                .insert(key.clone(), NetworkFlow::new(key, length_bytes, is_forward));
         }
     }
 
@@ -263,11 +273,27 @@ mod tests {
         let ip_server = IpAddr::V4(Ipv4Addr::new(93, 184, 216, 34));
 
         // SYN from client
-        tracker.process_packet(ip_client, 40000, ip_server, 80, FlowProtocol::Tcp, 60, Some(0x02));
+        tracker.process_packet(
+            ip_client,
+            40000,
+            ip_server,
+            80,
+            FlowProtocol::Tcp,
+            60,
+            Some(0x02),
+        );
         assert_eq!(tracker.count(), 1);
 
         // SYN-ACK from server
-        tracker.process_packet(ip_server, 80, ip_client, 40000, FlowProtocol::Tcp, 60, Some(0x12));
+        tracker.process_packet(
+            ip_server,
+            80,
+            ip_client,
+            40000,
+            FlowProtocol::Tcp,
+            60,
+            Some(0x12),
+        );
         assert_eq!(tracker.count(), 1);
 
         let flows = tracker.active_flows();

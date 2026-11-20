@@ -10,5 +10,3 @@ description = "Desktop integration, notifications, and Linux system interactions
 netscope-core = { path = "../netscope-core" }
 tracing = "0.1"
 notify-rust = "4.11"
-thiserror = "1.0"
-anyhow = "1.0"

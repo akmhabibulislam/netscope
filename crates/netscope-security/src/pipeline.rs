@@ -66,8 +66,14 @@ impl ThreatPipeline {
     }
 
     /// Fetches, validates, and parses an update from a supported remote feed
-    pub async fn fetch_feed_updates(&mut self, provider_id: &str) -> Result<Vec<ThreatIndicator>, String> {
-        let provider = self.providers.iter_mut().find(|p| p.id == provider_id)
+    pub async fn fetch_feed_updates(
+        &mut self,
+        provider_id: &str,
+    ) -> Result<Vec<ThreatIndicator>, String> {
+        let provider = self
+            .providers
+            .iter_mut()
+            .find(|p| p.id == provider_id)
             .ok_or_else(|| format!("Unknown provider id: {}", provider_id))?;
 
         if !provider.enabled {
@@ -79,7 +85,8 @@ impl ThreatPipeline {
             .build()
             .map_err(|e| format!("HTTP client error: {}", e))?;
 
-        let resp = client.get(&provider.url)
+        let resp = client
+            .get(&provider.url)
             .send()
             .await
             .map_err(|e| format!("Network request failed: {}", e))?;
@@ -94,7 +101,10 @@ impl ThreatPipeline {
             return Err("Feed response exceeded maximum allowed size (5MB)".to_string());
         }
 
-        let body = resp.text().await.map_err(|e| format!("Failed to read body: {}", e))?;
+        let body = resp
+            .text()
+            .await
+            .map_err(|e| format!("Failed to read body: {}", e))?;
         let now = Utc::now();
         let mut indicators = Vec::new();
 
@@ -108,7 +118,11 @@ impl ThreatPipeline {
                     if let Ok(ip) = IpAddr::from_str(trimmed) {
                         indicators.push(ThreatIndicator {
                             indicator: ip.to_string(),
-                            indicator_type: if ip.is_ipv4() { "IPv4".to_string() } else { "IPv6".to_string() },
+                            indicator_type: if ip.is_ipv4() {
+                                "IPv4".to_string()
+                            } else {
+                                "IPv6".to_string()
+                            },
                             category: "Tor Anonymization Relay".to_string(),
                             source: provider.name.clone(),
                             confidence: 85, // Transparent separate classification, not 95+ malware
@@ -126,10 +140,17 @@ impl ThreatPipeline {
                         for item in arr {
                             if let Some(ip_str) = item.get("ip_address").and_then(|v| v.as_str()) {
                                 if let Ok(ip) = IpAddr::from_str(ip_str) {
-                                    let malware = item.get("malware").and_then(|v| v.as_str()).unwrap_or("Botnet C2");
+                                    let malware = item
+                                        .get("malware")
+                                        .and_then(|v| v.as_str())
+                                        .unwrap_or("Botnet C2");
                                     indicators.push(ThreatIndicator {
                                         indicator: ip.to_string(),
-                                        indicator_type: if ip.is_ipv4() { "IPv4".to_string() } else { "IPv6".to_string() },
+                                        indicator_type: if ip.is_ipv4() {
+                                            "IPv4".to_string()
+                                        } else {
+                                            "IPv6".to_string()
+                                        },
                                         category: format!("Malware C2 ({})", malware),
                                         source: provider.name.clone(),
                                         confidence: 95,
@@ -152,7 +173,11 @@ impl ThreatPipeline {
                                 if let Ok(ip) = IpAddr::from_str(host) {
                                     indicators.push(ThreatIndicator {
                                         indicator: ip.to_string(),
-                                        indicator_type: if ip.is_ipv4() { "IPv4".to_string() } else { "IPv6".to_string() },
+                                        indicator_type: if ip.is_ipv4() {
+                                            "IPv4".to_string()
+                                        } else {
+                                            "IPv6".to_string()
+                                        },
                                         category: "Malicious Payload Host".to_string(),
                                         source: provider.name.clone(),
                                         confidence: 90,
@@ -166,7 +191,12 @@ impl ThreatPipeline {
                     }
                 }
             }
-            _ => return Err(format!("Parser not implemented for provider {}", provider_id)),
+            _ => {
+                return Err(format!(
+                    "Parser not implemented for provider {}",
+                    provider_id
+                ))
+            }
         }
 
         provider.last_updated = Some(now);
@@ -198,7 +228,8 @@ invalid-ip
         let mut count = 0;
         for line in fixture.lines() {
             let trimmed = line.trim();
-            if !trimmed.is_empty() && !trimmed.starts_with('#') && IpAddr::from_str(trimmed).is_ok() {
+            if !trimmed.is_empty() && !trimmed.starts_with('#') && IpAddr::from_str(trimmed).is_ok()
+            {
                 count += 1;
             }
         }
@@ -215,6 +246,9 @@ invalid-ip
         let val: serde_json::Value = serde_json::from_str(json).unwrap();
         let arr = val.as_array().unwrap();
         assert_eq!(arr.len(), 2);
-        assert_eq!(arr[0].get("ip_address").unwrap().as_str().unwrap(), "194.26.29.114");
+        assert_eq!(
+            arr[0].get("ip_address").unwrap().as_str().unwrap(),
+            "194.26.29.114"
+        );
     }
 }

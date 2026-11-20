@@ -33,7 +33,6 @@ netscope-process = { path = "crates/netscope-process" }
 netscope-dns = { path = "crates/netscope-dns" }
 netscope-security = { path = "crates/netscope-security" }
 netscope-storage = { path = "crates/netscope-storage" }
-netscope-platform = { path = "crates/netscope-platform" }
 
 tokio = { version = "1.38", features = ["full"] }
 tracing = "0.1"

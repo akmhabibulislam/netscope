@@ -42,7 +42,9 @@ impl Investigator {
                         notes.push("Target belongs to documentation / test reserved address range (RFC 5737).".to_string());
                     }
                     if is_private {
-                        notes.push("Target is an internal RFC 1918 private IPv4 network.".to_string());
+                        notes.push(
+                            "Target is an internal RFC 1918 private IPv4 network.".to_string(),
+                        );
                     }
                 }
                 IpAddr::V6(v6) => {
@@ -63,7 +65,10 @@ impl Investigator {
         }
 
         // Offline threat check
-        let reputation = if resolved_ips.iter().any(|ip| ip == "198.51.100.23" || ip == "203.0.113.88") {
+        let reputation = if resolved_ips
+            .iter()
+            .any(|ip| ip == "198.51.100.23" || ip == "203.0.113.88")
+        {
             "KNOWN MALICIOUS C2".to_string()
         } else if is_private {
             "LOCAL / PRIVATE".to_string()
@@ -86,9 +91,21 @@ impl Investigator {
             is_ip,
             resolved_ips,
             reverse_dns: rev_dns,
-            asn: if is_private { None } else { Some("AS13335 / AS15169 Cloudflare/Google".to_string()) },
-            isp_or_org: if is_private { Some("Local Subnet".to_string()) } else { Some("Public Transit Network".to_string()) },
-            country: if is_private { Some("Localhost".to_string()) } else { Some("Global Anycast".to_string()) },
+            asn: if is_private {
+                None
+            } else {
+                Some("AS13335 / AS15169 Cloudflare/Google".to_string())
+            },
+            isp_or_org: if is_private {
+                Some("Local Subnet".to_string())
+            } else {
+                Some("Public Transit Network".to_string())
+            },
+            country: if is_private {
+                Some("Localhost".to_string())
+            } else {
+                Some("Global Anycast".to_string())
+            },
             city: None,
             is_private,
             is_reserved,

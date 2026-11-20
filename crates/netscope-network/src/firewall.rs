@@ -36,7 +36,10 @@ impl NetworkFirewall {
 
     /// Kill an active TCP connection using Linux `ss -K` (socket kill option)
     pub fn kill_connection(local_addr: &str, remote_addr: &str) -> Result<String, String> {
-        info!("Attempting to kill connection: {} -> {}", local_addr, remote_addr);
+        info!(
+            "Attempting to kill connection: {} -> {}",
+            local_addr, remote_addr
+        );
 
         let (local_ip_part, _local_port) = Self::parse_socket_endpoint(local_addr)
             .ok_or_else(|| format!("Invalid local address format: '{}'", local_addr))?;
@@ -44,7 +47,10 @@ impl NetworkFirewall {
             .ok_or_else(|| format!("Invalid remote address format: '{}'", remote_addr))?;
 
         if local_ip_part.is_loopback() && remote_ip_part.is_loopback() {
-            return Err("Refusing to terminate internal loopback connection (safety protection)".to_string());
+            return Err(
+                "Refusing to terminate internal loopback connection (safety protection)"
+                    .to_string(),
+            );
         }
 
         let filter = format!("dst {} and src {}", remote_addr, local_addr);
@@ -54,7 +60,10 @@ impl NetworkFirewall {
             .map_err(|e| format!("Failed to execute ss: {}", e))?;
 
         if output.status.success() {
-            Ok(format!("Socket {} -> {} termination signal sent successfully", local_addr, remote_addr))
+            Ok(format!(
+                "Socket {} -> {} termination signal sent successfully",
+                local_addr, remote_addr
+            ))
         } else {
             let err = String::from_utf8_lossy(&output.stderr);
             if err.contains("Operation not permitted") {
@@ -73,10 +82,14 @@ impl NetworkFirewall {
             .map_err(|_| format!("Invalid IP address format: '{}'", ip_str))?;
 
         if ip.is_loopback() {
-            return Err("Safety error: Refusing to block loopback address (127.0.0.1 / ::1)".to_string());
+            return Err(
+                "Safety error: Refusing to block loopback address (127.0.0.1 / ::1)".to_string(),
+            );
         }
         if ip.is_unspecified() {
-            return Err("Safety error: Refusing to block unspecified address (0.0.0.0 / ::)".to_string());
+            return Err(
+                "Safety error: Refusing to block unspecified address (0.0.0.0 / ::)".to_string(),
+            );
         }
 
         let (cmd, target_str) = match ip {
@@ -90,7 +103,10 @@ impl NetworkFirewall {
             .output()
         {
             if check.status.success() {
-                return Ok(format!("IP {} is already blocked in {} OUTPUT chain", ip, cmd));
+                return Ok(format!(
+                    "IP {} is already blocked in {} OUTPUT chain",
+                    ip, cmd
+                ));
             }
         }
 
@@ -100,14 +116,19 @@ impl NetworkFirewall {
             .map_err(|e| format!("Failed to invoke {}: {}", cmd, e))?;
 
         if output.status.success() {
-            Ok(format!("IP {} blocked via netfilter ({} OUTPUT DROP)", ip, cmd))
+            Ok(format!(
+                "IP {} blocked via netfilter ({} OUTPUT DROP)",
+                ip, cmd
+            ))
         } else {
             let err = String::from_utf8_lossy(&output.stderr);
-            Err(if err.contains("Permission denied") || err.contains("superuser") {
-                "Blocking IP addresses requires root or CAP_NET_ADMIN permissions".to_string()
-            } else {
-                err.trim().to_string()
-            })
+            Err(
+                if err.contains("Permission denied") || err.contains("superuser") {
+                    "Blocking IP addresses requires root or CAP_NET_ADMIN permissions".to_string()
+                } else {
+                    err.trim().to_string()
+                },
+            )
         }
     }
 
@@ -134,7 +155,10 @@ impl NetworkFirewall {
         }
 
         if removed_count > 0 {
-            Ok(format!("IP {} unblocked successfully (removed {} rule(s))", ip, removed_count))
+            Ok(format!(
+                "IP {} unblocked successfully (removed {} rule(s))",
+                ip, removed_count
+            ))
         } else {
             Err(format!("No active block rule found for IP {}", ip))
         }
@@ -145,10 +169,26 @@ impl NetworkFirewall {
     /// If ANY rule fails, automatically rolls back previously inserted rules to leave zero partial changes!
     pub fn activate_emergency_killswitch() -> Result<String, String> {
         let rules: [(&str, &[&str], &[&str]); 4] = [
-            ("iptables", &["-I", "OUTPUT", "1", "!", "-o", "lo", "-j", "DROP"], &["-D", "OUTPUT", "!", "-o", "lo", "-j", "DROP"]),
-            ("iptables", &["-I", "INPUT", "1", "!", "-i", "lo", "-j", "DROP"], &["-D", "INPUT", "!", "-i", "lo", "-j", "DROP"]),
-            ("ip6tables", &["-I", "OUTPUT", "1", "!", "-o", "lo", "-j", "DROP"], &["-D", "OUTPUT", "!", "-o", "lo", "-j", "DROP"]),
-            ("ip6tables", &["-I", "INPUT", "1", "!", "-i", "lo", "-j", "DROP"], &["-D", "INPUT", "!", "-i", "lo", "-j", "DROP"]),
+            (
+                "iptables",
+                &["-I", "OUTPUT", "1", "!", "-o", "lo", "-j", "DROP"],
+                &["-D", "OUTPUT", "!", "-o", "lo", "-j", "DROP"],
+            ),
+            (
+                "iptables",
+                &["-I", "INPUT", "1", "!", "-i", "lo", "-j", "DROP"],
+                &["-D", "INPUT", "!", "-i", "lo", "-j", "DROP"],
+            ),
+            (
+                "ip6tables",
+                &["-I", "OUTPUT", "1", "!", "-o", "lo", "-j", "DROP"],
+                &["-D", "OUTPUT", "!", "-o", "lo", "-j", "DROP"],
+            ),
+            (
+                "ip6tables",
+                &["-I", "INPUT", "1", "!", "-i", "lo", "-j", "DROP"],
+                &["-D", "INPUT", "!", "-i", "lo", "-j", "DROP"],
+            ),
         ];
 
         let mut applied_indices: Vec<usize> = Vec::new();
@@ -163,12 +203,22 @@ impl NetworkFirewall {
                     let err = String::from_utf8_lossy(&out.stderr);
                     warn!("Killswitch rule insertion failed for {}: {}. Initiating transactional rollback...", cmd, err.trim());
                     Self::rollback_rules(&rules, &applied_indices);
-                    return Err(format!("Transactional failure on {}: {}. All rules safely rolled back.", cmd, err.trim()));
+                    return Err(format!(
+                        "Transactional failure on {}: {}. All rules safely rolled back.",
+                        cmd,
+                        err.trim()
+                    ));
                 }
                 Err(e) => {
-                    warn!("Failed to execute {}: {}. Initiating transactional rollback...", cmd, e);
+                    warn!(
+                        "Failed to execute {}: {}. Initiating transactional rollback...",
+                        cmd, e
+                    );
                     Self::rollback_rules(&rules, &applied_indices);
-                    return Err(format!("Command invocation error on {}: {}. All rules safely rolled back.", cmd, e));
+                    return Err(format!(
+                        "Command invocation error on {}: {}. All rules safely rolled back.",
+                        cmd, e
+                    ));
                 }
             }
         }
@@ -186,10 +236,22 @@ impl NetworkFirewall {
     /// Deactivates emergency killswitch by clearing all associated DROP rules
     pub fn deactivate_emergency_killswitch() -> Result<String, String> {
         let rules = [
-            ("iptables", vec!["-D", "OUTPUT", "!", "-o", "lo", "-j", "DROP"]),
-            ("iptables", vec!["-D", "INPUT", "!", "-i", "lo", "-j", "DROP"]),
-            ("ip6tables", vec!["-D", "OUTPUT", "!", "-o", "lo", "-j", "DROP"]),
-            ("ip6tables", vec!["-D", "INPUT", "!", "-i", "lo", "-j", "DROP"]),
+            (
+                "iptables",
+                vec!["-D", "OUTPUT", "!", "-o", "lo", "-j", "DROP"],
+            ),
+            (
+                "iptables",
+                vec!["-D", "INPUT", "!", "-i", "lo", "-j", "DROP"],
+            ),
+            (
+                "ip6tables",
+                vec!["-D", "OUTPUT", "!", "-o", "lo", "-j", "DROP"],
+            ),
+            (
+                "ip6tables",
+                vec!["-D", "INPUT", "!", "-i", "lo", "-j", "DROP"],
+            ),
         ];
 
         for (cmd, args) in rules {
@@ -205,13 +267,23 @@ impl NetworkFirewall {
 
     /// Returns independent dual-stack status
     pub fn dual_stack_status() -> DualStackStatus {
-        let v4_out = Command::new("iptables").args(["-C", "OUTPUT", "!", "-o", "lo", "-j", "DROP"]).output();
-        let v4_in = Command::new("iptables").args(["-C", "INPUT", "!", "-i", "lo", "-j", "DROP"]).output();
-        let v6_out = Command::new("ip6tables").args(["-C", "OUTPUT", "!", "-o", "lo", "-j", "DROP"]).output();
-        let v6_in = Command::new("ip6tables").args(["-C", "INPUT", "!", "-i", "lo", "-j", "DROP"]).output();
+        let v4_out = Command::new("iptables")
+            .args(["-C", "OUTPUT", "!", "-o", "lo", "-j", "DROP"])
+            .output();
+        let v4_in = Command::new("iptables")
+            .args(["-C", "INPUT", "!", "-i", "lo", "-j", "DROP"])
+            .output();
+        let v6_out = Command::new("ip6tables")
+            .args(["-C", "OUTPUT", "!", "-o", "lo", "-j", "DROP"])
+            .output();
+        let v6_in = Command::new("ip6tables")
+            .args(["-C", "INPUT", "!", "-i", "lo", "-j", "DROP"])
+            .output();
 
-        let ipv4_active = matches!((v4_out, v4_in), (Ok(o), Ok(i)) if o.status.success() && i.status.success());
-        let ipv6_active = matches!((v6_out, v6_in), (Ok(o), Ok(i)) if o.status.success() && i.status.success());
+        let ipv4_active =
+            matches!((v4_out, v4_in), (Ok(o), Ok(i)) if o.status.success() && i.status.success());
+        let ipv6_active =
+            matches!((v6_out, v6_in), (Ok(o), Ok(i)) if o.status.success() && i.status.success());
 
         DualStackStatus {
             ipv4_active,

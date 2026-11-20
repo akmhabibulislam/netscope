@@ -18,7 +18,10 @@ pub struct WifiScanner;
 impl WifiScanner {
     pub fn get_wifi_details(iface_name: &str) -> Option<WifiInfo> {
         // Query iw dev <iface> link
-        let output = Command::new("iw").args(["dev", iface_name, "link"]).output().ok()?;
+        let output = Command::new("iw")
+            .args(["dev", iface_name, "link"])
+            .output()
+            .ok()?;
         if !output.status.success() {
             // Fallback: check /proc/net/wireless
             return Self::fallback_proc_net_wireless(iface_name);

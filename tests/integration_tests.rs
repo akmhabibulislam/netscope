@@ -28,7 +28,10 @@ fn test_security_rules_evaluation() {
     };
 
     let alerts = engine.evaluate_connections(&[suspicious_conn]);
-    assert!(!alerts.is_empty(), "Suspicious listening port 4444 should generate an alert");
+    assert!(
+        !alerts.is_empty(),
+        "Suspicious listening port 4444 should generate an alert"
+    );
     assert_eq!(alerts[0].severity, AlertSeverity::High);
     assert_eq!(alerts[0].rule_id, "RULE_SUSPICIOUS_PORT");
 }
@@ -62,7 +65,9 @@ fn test_storage_roundtrip() {
         active_interface: Some("eth0".to_string()),
     };
 
-    storage.insert_bandwidth_sample(&sample).expect("Insert sample");
+    storage
+        .insert_bandwidth_sample(&sample)
+        .expect("Insert sample");
     let recents = storage.get_recent_samples(10).expect("Query samples");
     assert_eq!(recents.len(), 1);
     assert_eq!(recents[0].rx_bytes_total, 54321);
@@ -73,8 +78,14 @@ fn test_storage_roundtrip() {
 async fn test_collector_live_polling() {
     let collector = NetworkCollector::new();
     let interfaces = collector.poll_interfaces().await;
-    assert!(!interfaces.is_empty(), "Linux systems must have at least loopback interface");
+    assert!(
+        !interfaces.is_empty(),
+        "Linux systems must have at least loopback interface"
+    );
 
     let conns = collector.poll_connections().await;
-    println!("Discovered {} active Linux network connections", conns.len());
+    println!(
+        "Discovered {} active Linux network connections",
+        conns.len()
+    );
 }
