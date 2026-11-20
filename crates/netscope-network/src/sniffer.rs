@@ -10,6 +10,35 @@ use std::sync::{mpsc, Arc, Mutex};
 use std::thread::JoinHandle;
 use tracing::{info, warn};
 
+/// RAII wrapper for POSIX socket file descriptor ensuring cleanup on all exit/error paths
+struct RawSocket(libc::c_int);
+
+impl RawSocket {
+    fn new(fd: libc::c_int) -> Self {
+        Self(fd)
+    }
+
+    fn as_raw_fd(&self) -> libc::c_int {
+        self.0
+    }
+
+    fn into_raw_fd(mut self) -> libc::c_int {
+        let fd = self.0;
+        self.0 = -1; // disarm Drop
+        fd
+    }
+}
+
+impl Drop for RawSocket {
+    fn drop(&mut self) {
+        if self.0 >= 0 {
+            unsafe {
+                libc::close(self.0);
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CaptureState {
     Stopped,
@@ -99,9 +128,6 @@ impl LiveTrafficSniffer {
         self.last_error.lock().ok().and_then(|e| e.clone())
     }
 
-    /// Synchronously attempts to start managed capture worker.
-    /// Returns Ok(()) ONLY after socket creation and binding succeed.
-    /// If an interface name is specified, properly resolves its ifindex and binds with sockaddr_ll!
     pub fn start_capture(&self) -> Result<(), String> {
         self.start_capture_on(None)
     }
@@ -109,7 +135,7 @@ impl LiveTrafficSniffer {
     pub fn start_capture_on(&self, interface: Option<&str>) -> Result<(), String> {
         let mut state_guard = self.state.lock().map_err(|e| e.to_string())?;
         if *state_guard == CaptureState::Running || *state_guard == CaptureState::Starting {
-            return Ok(()); // Already running
+            return Ok(());
         }
 
         *state_guard = CaptureState::Starting;
@@ -117,8 +143,8 @@ impl LiveTrafficSniffer {
             *err = None;
         }
 
-        // 1. Attempt raw socket creation directly in calling thread first to guarantee synchronous error feedback
-        let socket_fd = unsafe {
+        // 1. Create raw socket with RAII guard to guarantee closure on any failure
+        let raw_fd = unsafe {
             libc::socket(
                 libc::AF_PACKET,
                 libc::SOCK_RAW,
@@ -126,10 +152,14 @@ impl LiveTrafficSniffer {
             )
         };
 
-        if socket_fd < 0 {
-            let err_msg =
+        if raw_fd < 0 {
+            let errno = unsafe { *libc::__errno_location() };
+            let err_msg = if errno == libc::EPERM || errno == libc::EACCES {
                 "AF_PACKET raw socket permission denied: CAP_NET_RAW capability required."
-                    .to_string();
+                    .to_string()
+            } else {
+                format!("Failed to create AF_PACKET raw socket (errno: {})", errno)
+            };
             if let Ok(mut p) = self.has_raw_permission.lock() {
                 *p = false;
             }
@@ -141,17 +171,26 @@ impl LiveTrafficSniffer {
             return Err(err_msg);
         }
 
+        let socket = RawSocket::new(raw_fd);
+
         if let Ok(mut p) = self.has_raw_permission.lock() {
             *p = true;
         }
 
-        // 2. Interface Binding: if an interface is specified, bind directly using libc::sockaddr_ll
+        // 2. Interface Binding: if an interface is specified, validate and bind using libc::sockaddr_ll
         if let Some(if_name) = interface {
-            let c_ifname = std::ffi::CString::new(if_name).map_err(|e| e.to_string())?;
+            let c_ifname = std::ffi::CString::new(if_name).map_err(|_| {
+                let msg = format!("Interface name '{}' contains invalid null bytes", if_name);
+                *state_guard = CaptureState::Failed;
+                msg
+            })?;
+
             let ifindex = unsafe { libc::if_nametoindex(c_ifname.as_ptr()) };
             if ifindex == 0 {
-                unsafe { libc::close(socket_fd) };
-                let err_msg = format!("Interface '{}' not found or invalid ifindex", if_name);
+                let err_msg = format!("Interface '{}' not found or inactive (ifindex: 0)", if_name);
+                if let Ok(mut err) = self.last_error.lock() {
+                    *err = Some(err_msg.clone());
+                }
                 *state_guard = CaptureState::Failed;
                 return Err(err_msg);
             }
@@ -163,19 +202,21 @@ impl LiveTrafficSniffer {
 
             let bind_res = unsafe {
                 libc::bind(
-                    socket_fd,
+                    socket.as_raw_fd(),
                     &bind_addr as *const _ as *const libc::sockaddr,
                     std::mem::size_of::<libc::sockaddr_ll>() as libc::socklen_t,
                 )
             };
 
             if bind_res < 0 {
-                unsafe { libc::close(socket_fd) };
+                let errno = unsafe { *libc::__errno_location() };
                 let err_msg = format!(
                     "Failed to bind AF_PACKET to interface '{}' (errno: {})",
-                    if_name,
-                    unsafe { *libc::__errno_location() }
+                    if_name, errno
                 );
+                if let Ok(mut err) = self.last_error.lock() {
+                    *err = Some(err_msg.clone());
+                }
                 *state_guard = CaptureState::Failed;
                 return Err(err_msg);
             }
@@ -185,14 +226,14 @@ impl LiveTrafficSniffer {
             );
         }
 
-        // Configure socket timeout: 250ms
+        // 3. Configure socket timeout (250ms) to allow responsive stop checks
         let tv = libc::timeval {
             tv_sec: 0,
             tv_usec: 250_000,
         };
         let sockopt_res = unsafe {
             libc::setsockopt(
-                socket_fd,
+                socket.as_raw_fd(),
                 libc::SOL_SOCKET,
                 libc::SO_RCVTIMEO,
                 &tv as *const _ as *const libc::c_void,
@@ -200,8 +241,10 @@ impl LiveTrafficSniffer {
             )
         };
         if sockopt_res < 0 {
-            unsafe { libc::close(socket_fd) };
             let err_msg = "Failed to configure SO_RCVTIMEO on packet socket".to_string();
+            if let Ok(mut err) = self.last_error.lock() {
+                *err = Some(err_msg.clone());
+            }
             *state_guard = CaptureState::Failed;
             return Err(err_msg);
         }
@@ -219,11 +262,14 @@ impl LiveTrafficSniffer {
 
         *state_guard = CaptureState::Running;
 
+        // Disarm caller RAII guard and transfer ownership to worker thread
+        let transfer_fd = socket.into_raw_fd();
+
         let handle = std::thread::spawn(move || {
+            let worker_socket = RawSocket::new(transfer_fd);
             let mut raw_buffer = [0u8; 65535];
 
             loop {
-                // Check stop signal non-blockingly
                 if stop_rx.try_recv().is_ok() {
                     break;
                 }
@@ -233,7 +279,7 @@ impl LiveTrafficSniffer {
 
                 let n = unsafe {
                     libc::recvfrom(
-                        socket_fd,
+                        worker_socket.as_raw_fd(),
                         raw_buffer.as_mut_ptr() as *mut libc::c_void,
                         raw_buffer.len(),
                         0,
@@ -244,12 +290,6 @@ impl LiveTrafficSniffer {
 
                 if n > 14 {
                     let packet_bytes = &raw_buffer[..n as usize];
-                    // Extract packet type from Linux sockaddr_ll:
-                    // PACKET_HOST = 0 (Incoming to local machine)
-                    // PACKET_BROADCAST = 1
-                    // PACKET_MULTICAST = 2
-                    // PACKET_OTHERHOST = 3 (Promiscuous)
-                    // PACKET_OUTGOING = 4 (Outgoing from local machine)
                     let pkttype = saddr.sll_pkttype;
                     let ifindex = saddr.sll_ifindex;
 
@@ -281,7 +321,7 @@ impl LiveTrafficSniffer {
                                     dp,
                                     proto,
                                     packet.length_bytes,
-                                    None,
+                                    packet.tcp_flags,
                                 );
                             }
                         }
@@ -296,37 +336,37 @@ impl LiveTrafficSniffer {
                 }
             }
 
-            unsafe { libc::close(socket_fd) };
+            // worker_socket dropped here, calling libc::close
+            drop(worker_socket);
+
             if let Ok(mut st) = state_arc.lock() {
                 *st = CaptureState::Stopped;
             }
-            info!("Live packet sniffer worker joined and shut down cleanly");
         });
 
-        if let Ok(mut w) = self.worker_handle.lock() {
-            *w = Some(handle);
+        if let Ok(mut h) = self.worker_handle.lock() {
+            *h = Some(handle);
         }
 
         Ok(())
     }
 
-    /// Stops capture worker and deterministically joins thread
     pub fn stop_capture(&self) {
-        if let Ok(mut st) = self.state.lock() {
-            if *st != CaptureState::Running && *st != CaptureState::Starting {
+        if let Ok(mut state_guard) = self.state.lock() {
+            if *state_guard != CaptureState::Running {
                 return;
             }
-            *st = CaptureState::Stopping;
+            *state_guard = CaptureState::Stopping;
         }
 
-        if let Ok(mut s) = self.stop_signal.lock() {
-            if let Some(tx) = s.take() {
+        if let Ok(mut sig) = self.stop_signal.lock() {
+            if let Some(tx) = sig.take() {
                 let _ = tx.send(());
             }
         }
 
-        if let Ok(mut w) = self.worker_handle.lock() {
-            if let Some(handle) = w.take() {
+        if let Ok(mut h) = self.worker_handle.lock() {
+            if let Some(handle) = h.take() {
                 let _ = handle.join();
             }
         }
@@ -353,8 +393,6 @@ impl LiveTrafficSniffer {
         }
     }
 
-    /// Comprehensive Ethernet frame parser supporting VLAN tags (802.1Q), IPv4 (with fragment offset check),
-    /// IPv6 (with full Extension Header traversal), and Linux kernel sll_pkttype directional metadata.
     pub fn parse_ethernet_frame(
         bytes: &[u8],
         counter: &AtomicU64,
@@ -442,6 +480,7 @@ impl LiveTrafficSniffer {
                 "{} (Who has {}? Tell {}) [{} bytes]",
                 op_name, dst_ip, src_ip, total_frame_len
             ),
+            tcp_flags: None,
         })
     }
 
@@ -466,13 +505,11 @@ impl LiveTrafficSniffer {
             return None;
         }
 
-        // Strict IPv4 Total Length validation
         let total_length = u16::from_be_bytes([ip_bytes[2], ip_bytes[3]]) as usize;
         if total_length > ip_bytes.len() || total_length < ihl {
-            return None; // Corrupted or truncated header length
+            return None;
         }
 
-        // IPv4 Fragmentation handling
         let flags_frag = u16::from_be_bytes([ip_bytes[6], ip_bytes[7]]);
         let frag_offset = (flags_frag & 0x1FFF) * 8;
         let is_non_initial_fragment = frag_offset > 0;
@@ -483,38 +520,31 @@ impl LiveTrafficSniffer {
 
         let payload = &ip_bytes[ihl..total_length];
 
-        let (src_port, dst_port, proto_name, app_info) = if is_non_initial_fragment {
-            (None, None, "IPv4-Frag", "IPv4 Non-Initial Fragment")
+        let (src_port, dst_port, tcp_flags, proto_name, app_info) = if is_non_initial_fragment {
+            (None, None, None, "IPv4-Frag", "IPv4 Non-Initial Fragment")
         } else {
             match protocol_num {
                 6 => {
-                    // TCP (min header 20 bytes)
+                    // TCP (minimum header 20 bytes)
                     if payload.len() >= 20 {
                         let sp = u16::from_be_bytes([payload[0], payload[1]]);
                         let dp = u16::from_be_bytes([payload[2], payload[3]]);
                         let data_offset = ((payload[12] >> 4) as usize) * 4;
                         if data_offset < 20 || data_offset > payload.len() {
-                            (Some(sp), Some(dp), "TCP", "TCP (Malformed Offset)")
+                            (None, None, None, "TCP", "TCP (Malformed Data Offset)")
                         } else {
-                            let app = if sp == 443 || dp == 443 {
-                                "TLS/HTTPS"
-                            } else if sp == 80 || dp == 80 {
-                                "HTTP"
-                            } else if sp == 53 || dp == 53 {
-                                "DNS-over-TCP"
-                            } else if sp == 22 || dp == 22 {
-                                "SSH"
-                            } else {
-                                "TCP"
+                            let flags = payload[13];
+                            let app = match (sp, dp) {
+                                (443, _) | (_, 443) => "TLS/HTTPS",
+                                (80, _) | (_, 80) => "HTTP",
+                                (53, _) | (_, 53) => "DNS-over-TCP",
+                                (22, _) | (_, 22) => "SSH",
+                                _ => "TCP",
                             };
-                            (Some(sp), Some(dp), "TCP", app)
+                            (Some(sp), Some(dp), Some(flags), "TCP", app)
                         }
-                    } else if payload.len() >= 4 {
-                        let sp = u16::from_be_bytes([payload[0], payload[1]]);
-                        let dp = u16::from_be_bytes([payload[2], payload[3]]);
-                        (Some(sp), Some(dp), "TCP", "TCP (Truncated)")
                     } else {
-                        (None, None, "TCP", "TCP")
+                        (None, None, None, "TCP", "TCP (Truncated Header)")
                     }
                 }
                 17 => {
@@ -524,32 +554,33 @@ impl LiveTrafficSniffer {
                         let dp = u16::from_be_bytes([payload[2], payload[3]]);
                         let udp_len = u16::from_be_bytes([payload[4], payload[5]]) as usize;
                         if udp_len < 8 || udp_len > payload.len() {
-                            (Some(sp), Some(dp), "UDP", "UDP (Length Mismatch)")
+                            (None, None, None, "UDP", "UDP (Length Mismatch)")
                         } else {
-                            let app = if sp == 53 || dp == 53 {
-                                "DNS"
-                            } else if sp == 67 || dp == 67 || sp == 68 || dp == 68 {
-                                "DHCP"
-                            } else if sp == 443 || dp == 443 {
-                                "QUIC/HTTP3"
-                            } else if sp == 123 || dp == 123 {
-                                "NTP"
-                            } else {
-                                "UDP"
+                            let app = match (sp, dp) {
+                                (53, _) | (_, 53) => "DNS",
+                                (67, _) | (_, 67) | (68, _) | (_, 68) => "DHCP",
+                                (443, _) | (_, 443) => "QUIC/HTTP3",
+                                (123, _) | (_, 123) => "NTP",
+                                _ => "UDP",
                             };
-                            (Some(sp), Some(dp), "UDP", app)
+                            (Some(sp), Some(dp), None, "UDP", app)
                         }
-                    } else if payload.len() >= 4 {
-                        let sp = u16::from_be_bytes([payload[0], payload[1]]);
-                        let dp = u16::from_be_bytes([payload[2], payload[3]]);
-                        (Some(sp), Some(dp), "UDP", "UDP (Truncated)")
                     } else {
-                        (None, None, "UDP", "UDP")
+                        (None, None, None, "UDP", "UDP (Truncated Header)")
                     }
                 }
                 1 => {
                     // ICMP
                     let icmp_type = if !payload.is_empty() { payload[0] } else { 255 };
+                    let (sp, dp) = if payload.len() >= 8 && (icmp_type == 8 || icmp_type == 0) {
+                        let id = u16::from_be_bytes([payload[4], payload[5]]);
+                        (Some(id), Some(id))
+                    } else if payload.len() >= 2 {
+                        (Some(payload[0] as u16), Some(payload[1] as u16))
+                    } else {
+                        (None, None)
+                    };
+
                     let desc = match icmp_type {
                         0 => "ICMP Echo Reply",
                         8 => "ICMP Echo Request",
@@ -557,25 +588,24 @@ impl LiveTrafficSniffer {
                         11 => "ICMP Time Exceeded",
                         _ => "ICMP Control",
                     };
-                    (None, None, "ICMP", desc)
+                    (sp, dp, None, "ICMP", desc)
                 }
                 50 => (
+                    None,
                     None,
                     None,
                     "ESP",
                     "IPsec Encapsulated Security Payload (Encrypted)",
                 ),
-                51 => (None, None, "AH", "IPsec Authentication Header"),
-                _ => (None, None, "IPv4", "Raw IPv4 Protocol"),
+                51 => (None, None, None, "AH", "IPsec Authentication Header"),
+                _ => (None, None, None, "IPv4", "Raw IPv4 Protocol"),
             }
         };
 
-        // Direction classification: prioritize Linux kernel sll_pkttype
         let is_outbound = match sll_pkttype {
             4 => true,      // PACKET_OUTGOING
             0..=3 => false, // PACKET_HOST, BROADCAST, MULTICAST, OTHERHOST
             _ => {
-                // Fallback to verified local interface IP matching
                 if let Ok(ips) = local_ips_arc.lock() {
                     ips.contains(&IpAddr::V4(src_ip))
                 } else {
@@ -610,10 +640,11 @@ impl LiveTrafficSniffer {
             dst_port,
             length_bytes: total_frame_len,
             summary,
+            tcp_flags,
         })
     }
 
-    /// Parse IPv6 packet with full RFC 8200 Extension Header traversal
+    /// Parse IPv6 packet with RFC 8200 Extension Header traversal and TCP flags extraction
     fn parse_ipv6(
         ip_bytes: &[u8],
         total_frame_len: usize,
@@ -681,9 +712,8 @@ impl LiveTrafficSniffer {
                     let ah_len = ((ip_bytes[offset + 1] as usize) + 2) * 4;
                     offset += ah_len;
                 }
-                // Encapsulated Security Payload (50)
+                // ESP or terminal
                 50 => break,
-                // Terminal Protocol
                 _ => break,
             }
         }
@@ -694,55 +724,75 @@ impl LiveTrafficSniffer {
             &[]
         };
 
-        let (src_port, dst_port, proto_name, app_info) = if is_non_initial_fragment {
-            (None, None, "IPv6-Frag", "IPv6 Fragment Continuation")
+        let (src_port, dst_port, tcp_flags, proto_name, app_info) = if is_non_initial_fragment {
+            (None, None, None, "IPv6-Frag", "IPv6 Fragment Continuation")
         } else {
             match next_header {
                 6 => {
                     // TCP
-                    if payload.len() >= 4 {
+                    if payload.len() >= 20 {
                         let sp = u16::from_be_bytes([payload[0], payload[1]]);
                         let dp = u16::from_be_bytes([payload[2], payload[3]]);
-                        let app = if sp == 443 || dp == 443 {
-                            "TLS/HTTPS"
-                        } else if sp == 80 || dp == 80 {
-                            "HTTP"
-                        } else if sp == 53 || dp == 53 {
-                            "DNS"
+                        let data_offset = ((payload[12] >> 4) as usize) * 4;
+                        if data_offset < 20 || data_offset > payload.len() {
+                            (None, None, None, "TCP", "TCP (Malformed Data Offset)")
                         } else {
-                            "TCP"
-                        };
-                        (Some(sp), Some(dp), "TCP", app)
+                            let flags = payload[13];
+                            let app = match (sp, dp) {
+                                (443, _) | (_, 443) => "TLS/HTTPS",
+                                (80, _) | (_, 80) => "HTTP",
+                                (53, _) | (_, 53) => "DNS",
+                                (22, _) | (_, 22) => "SSH",
+                                _ => "TCP",
+                            };
+                            (Some(sp), Some(dp), Some(flags), "TCP", app)
+                        }
                     } else {
-                        (None, None, "TCP", "TCP")
+                        (None, None, None, "TCP", "TCP (Truncated Header)")
                     }
                 }
                 17 => {
                     // UDP
-                    if payload.len() >= 4 {
+                    if payload.len() >= 8 {
                         let sp = u16::from_be_bytes([payload[0], payload[1]]);
                         let dp = u16::from_be_bytes([payload[2], payload[3]]);
-                        let app = if sp == 53 || dp == 53 {
-                            "DNS"
-                        } else if sp == 443 || dp == 443 {
-                            "QUIC"
+                        let udp_len = u16::from_be_bytes([payload[4], payload[5]]) as usize;
+                        if udp_len < 8 || udp_len > payload.len() {
+                            (None, None, None, "UDP", "UDP (Length Mismatch)")
                         } else {
-                            "UDP"
-                        };
-                        (Some(sp), Some(dp), "UDP", app)
+                            let app = match (sp, dp) {
+                                (53, _) | (_, 53) => "DNS",
+                                (443, _) | (_, 443) => "QUIC",
+                                _ => "UDP",
+                            };
+                            (Some(sp), Some(dp), None, "UDP", app)
+                        }
                     } else {
-                        (None, None, "UDP", "UDP")
+                        (None, None, None, "UDP", "UDP (Truncated Header)")
                     }
                 }
-                58 => (None, None, "ICMPv6", "ICMPv6 Control"),
+                58 => {
+                    // ICMPv6
+                    let (sp, dp) = if payload.len() >= 8 && (payload[0] == 128 || payload[0] == 129)
+                    {
+                        let id = u16::from_be_bytes([payload[4], payload[5]]);
+                        (Some(id), Some(id))
+                    } else if payload.len() >= 2 {
+                        (Some(payload[0] as u16), Some(payload[1] as u16))
+                    } else {
+                        (None, None)
+                    };
+                    (sp, dp, None, "ICMPv6", "ICMPv6 Control")
+                }
                 50 => (
+                    None,
                     None,
                     None,
                     "ESP",
                     "IPsec Encapsulated Security Payload (Encrypted)",
                 ),
-                51 => (None, None, "AH", "IPsec Authentication Header"),
-                _ => (None, None, "IPv6", "IPv6 NextHeader"),
+                51 => (None, None, None, "AH", "IPsec Authentication Header"),
+                _ => (None, None, None, "IPv6", "IPv6 NextHeader"),
             }
         };
 
@@ -784,6 +834,7 @@ impl LiveTrafficSniffer {
             dst_port,
             length_bytes: total_frame_len,
             summary,
+            tcp_flags,
         })
     }
 }
@@ -800,125 +851,163 @@ mod tests {
 
     #[test]
     fn test_parse_arp_frame() {
-        let mut frame = vec![0u8; 42];
-        frame[12] = 0x08;
-        frame[13] = 0x06; // EtherType = ARP
-        frame[14 + 6] = 0x00;
-        frame[14 + 7] = 0x01; // Opcode = 1 (Request)
-                              // Sender IP: 192.168.1.1
-        frame[14 + 14] = 192;
-        frame[14 + 15] = 168;
-        frame[14 + 16] = 1;
-        frame[14 + 17] = 1;
-        // Target IP: 192.168.1.254
-        frame[14 + 24] = 192;
-        frame[14 + 25] = 168;
-        frame[14 + 26] = 1;
-        frame[14 + 27] = 254;
-
         let counter = AtomicU64::new(0);
-        let local_ips = Arc::new(Mutex::new(vec![]));
-        let packet = LiveTrafficSniffer::parse_ethernet_frame(&frame, &counter, &local_ips)
-            .expect("Must parse ARP");
+        let mut frame = vec![0u8; 42];
+        frame[0..6].copy_from_slice(&[0xFF; 6]);
+        frame[6..12].copy_from_slice(&[0x00, 0x11, 0x22, 0x33, 0x44, 0x55]);
+        frame[12..14].copy_from_slice(&0x0806u16.to_be_bytes()); // ARP
 
-        assert_eq!(packet.protocol, "ARP");
-        assert_eq!(packet.src_addr, "192.168.1.1");
-        assert_eq!(packet.dst_addr, "192.168.1.254");
+        frame[14..16].copy_from_slice(&1u16.to_be_bytes()); // Eth
+        frame[16..18].copy_from_slice(&0x0800u16.to_be_bytes()); // IP
+        frame[18] = 6;
+        frame[19] = 4;
+        frame[20..22].copy_from_slice(&1u16.to_be_bytes()); // Request
+
+        // Sender IP: 192.168.1.1
+        frame[28..32].copy_from_slice(&[192, 168, 1, 1]);
+        // Target IP: 192.168.1.100
+        frame[38..42].copy_from_slice(&[192, 168, 1, 100]);
+
+        let local_ips = Arc::new(Mutex::new(Vec::new()));
+        let res = LiveTrafficSniffer::parse_ethernet_frame(&frame, &counter, &local_ips)
+            .expect("Must parse ARP");
+        assert_eq!(res.protocol, "ARP");
+        assert_eq!(res.src_addr, "192.168.1.1");
+        assert_eq!(res.dst_addr, "192.168.1.100");
     }
 
     #[test]
-    fn test_parse_valid_ipv4_tcp_frame() {
-        let mut frame = vec![0u8; 54];
-        frame[12] = 0x08;
-        frame[13] = 0x00;
-        frame[14] = 0x45; // IPv4, IHL 5
-        frame[16] = 0x00;
-        frame[17] = 40; // Total length = 40
-        frame[23] = 6; // TCP
-        frame[26] = 192;
-        frame[27] = 168;
-        frame[28] = 1;
-        frame[29] = 50;
-        frame[30] = 1;
-        frame[31] = 1;
-        frame[32] = 1;
-        frame[33] = 1;
-        frame[34] = 0xD4;
-        frame[35] = 0x31; // port 54321
-        frame[36] = 0x01;
-        frame[37] = 0xBB; // port 443
-        frame[46] = 0x50; // TCP Data offset = 5 words (20 bytes)
-
+    fn test_parse_valid_ipv4_tcp_frame_extracts_flags() {
         let counter = AtomicU64::new(0);
-        let local_ips = Arc::new(Mutex::new(vec![IpAddr::V4(Ipv4Addr::new(192, 168, 1, 50))]));
-        // PACKET_OUTGOING = 4
-        let packet =
-            LiveTrafficSniffer::parse_ethernet_frame_with_meta(&frame, 4, 1, &counter, &local_ips)
-                .expect("Must parse valid IPv4 TCP frame");
+        let mut frame = vec![0u8; 54];
+        frame[12..14].copy_from_slice(&0x0800u16.to_be_bytes()); // IPv4
 
-        assert_eq!(packet.protocol, "TCP");
-        assert_eq!(packet.src_addr, "192.168.1.50");
-        assert_eq!(packet.dst_addr, "1.1.1.1");
-        assert_eq!(packet.src_port, Some(54321));
-        assert_eq!(packet.dst_port, Some(443));
-        assert_eq!(packet.direction, PacketDirection::Outbound);
+        // IPv4 Header
+        frame[14] = 0x45; // Version 4, IHL 5 (20 bytes)
+        frame[16..18].copy_from_slice(&40u16.to_be_bytes()); // Total length: 20 IP + 20 TCP
+        frame[23] = 6; // TCP
+        frame[26..30].copy_from_slice(&[10, 0, 0, 1]); // src
+        frame[30..34].copy_from_slice(&[10, 0, 0, 2]); // dst
+
+        // TCP Header (offset 34)
+        frame[34..36].copy_from_slice(&54321u16.to_be_bytes()); // src port
+        frame[36..38].copy_from_slice(&443u16.to_be_bytes()); // dst port: 443
+        frame[46] = 0x50; // Data offset 5 (20 bytes)
+        frame[47] = 0x12; // SYN-ACK (0x02 | 0x10)
+
+        let local_ips = Arc::new(Mutex::new(Vec::new()));
+        let res = LiveTrafficSniffer::parse_ethernet_frame(&frame, &counter, &local_ips)
+            .expect("Must parse valid IPv4 TCP frame");
+
+        assert_eq!(res.protocol, "TCP");
+        assert_eq!(res.src_port, Some(54321));
+        assert_eq!(res.dst_port, Some(443));
+        assert_eq!(res.tcp_flags, Some(0x12)); // SYN-ACK extracted!
+    }
+
+    #[test]
+    fn test_parse_ipv4_truncated_tcp_header_rejects_ports() {
+        let counter = AtomicU64::new(0);
+        let mut frame = vec![0u8; 40]; // Only 6 bytes of TCP payload
+        frame[12..14].copy_from_slice(&0x0800u16.to_be_bytes());
+        frame[14] = 0x45;
+        frame[16..18].copy_from_slice(&26u16.to_be_bytes()); // 20 IP + 6 TCP
+        frame[23] = 6; // TCP
+        frame[26..30].copy_from_slice(&[10, 0, 0, 1]);
+        frame[30..34].copy_from_slice(&[10, 0, 0, 2]);
+
+        let local_ips = Arc::new(Mutex::new(Vec::new()));
+        let res = LiveTrafficSniffer::parse_ethernet_frame(&frame, &counter, &local_ips)
+            .expect("Must parse IP summary");
+
+        assert_eq!(res.protocol, "TCP");
+        assert_eq!(res.src_port, None); // Truncated header MUST NOT report ports!
+        assert_eq!(res.dst_port, None);
+        assert_eq!(res.tcp_flags, None);
     }
 
     #[test]
     fn test_parse_ipv4_non_initial_fragment() {
-        let mut frame = vec![0u8; 60];
-        frame[12] = 0x08;
-        frame[13] = 0x00;
-        frame[14] = 0x45;
-        frame[16] = 0x00;
-        frame[17] = 46; // Total Length
-                        // Fragment offset = 185 (0x00B9) -> non-initial fragment
-        frame[20] = 0x00;
-        frame[21] = 0xB9;
-        frame[23] = 6; // Protocol = TCP
-        frame[26] = 10;
-        frame[27] = 0;
-        frame[28] = 0;
-        frame[29] = 1;
-        frame[30] = 10;
-        frame[31] = 0;
-        frame[32] = 0;
-        frame[33] = 2;
-
         let counter = AtomicU64::new(0);
-        let local_ips = Arc::new(Mutex::new(vec![]));
-        let packet = LiveTrafficSniffer::parse_ethernet_frame(&frame, &counter, &local_ips)
-            .expect("Must parse fragment");
+        let mut frame = vec![0u8; 38];
+        frame[12..14].copy_from_slice(&0x0800u16.to_be_bytes()); // IPv4
+        frame[14] = 0x45;
+        frame[16..18].copy_from_slice(&24u16.to_be_bytes());
+        // Fragment offset = 185 (0x00B9)
+        frame[20..22].copy_from_slice(&0x00B9u16.to_be_bytes());
+        frame[23] = 6; // TCP
+        frame[26..30].copy_from_slice(&[192, 168, 1, 5]);
+        frame[30..34].copy_from_slice(&[8, 8, 8, 8]);
 
-        assert_eq!(packet.protocol, "IPv4-Frag");
-        assert_eq!(packet.src_port, None);
+        let local_ips = Arc::new(Mutex::new(Vec::new()));
+        let res = LiveTrafficSniffer::parse_ethernet_frame(&frame, &counter, &local_ips)
+            .expect("Must parse fragment");
+        assert_eq!(res.protocol, "IPv4-Frag");
+        assert_eq!(res.src_port, None);
+        assert_eq!(res.dst_port, None);
     }
 
     #[test]
-    fn test_parse_ipv6_with_extension_header() {
-        let mut frame = vec![0u8; 70];
-        frame[12] = 0x86;
-        frame[13] = 0xDD; // IPv6 EtherType
-        frame[14] = 0x60; // Version 6
-        frame[18] = 0x00;
-        frame[19] = 16; // Payload length = 16 bytes
-        frame[20] = 0; // Next Header = Hop-by-Hop (0)
-                       // Hop-by-Hop header at offset 54 (14 + 40):
-        frame[54] = 6; // Next Header inside Hop-by-Hop is TCP (6)
-        frame[55] = 0; // Header Ext Length: 0 (meaning 8 bytes total)
-                       // TCP ports at offset 62 (54 + 8):
-        frame[62] = 0x01;
-        frame[63] = 0xBB; // 443
-        frame[64] = 0x1F;
-        frame[65] = 0x90; // 8080
-
+    fn test_parse_ipv6_with_extension_header_and_tcp_flags() {
         let counter = AtomicU64::new(0);
-        let local_ips = Arc::new(Mutex::new(vec![]));
-        let packet = LiveTrafficSniffer::parse_ethernet_frame(&frame, &counter, &local_ips)
-            .expect("Must parse IPv6 with extension header");
+        let mut frame = vec![0u8; 82]; // 14 eth + 40 ipv6 + 8 hop-by-hop + 20 tcp
+        frame[12..14].copy_from_slice(&0x86DDu16.to_be_bytes()); // IPv6
 
-        assert_eq!(packet.protocol, "TCP");
-        assert_eq!(packet.src_port, Some(443));
-        assert_eq!(packet.dst_port, Some(8080));
+        // IPv6 Header (offset 14)
+        frame[14] = 0x60; // Version 6
+        frame[18..20].copy_from_slice(&28u16.to_be_bytes()); // Payload len: 8 hop + 20 tcp
+        frame[20] = 0; // NextHeader: Hop-by-Hop (0)
+        frame[22..38]
+            .copy_from_slice(&[0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]); // 2001:db8::1
+        frame[38..54]
+            .copy_from_slice(&[0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2]); // 2001:db8::2
+
+        // Hop-by-Hop Extension Header (offset 54)
+        frame[54] = 6; // Next Header: TCP
+        frame[55] = 0; // Length: (0 + 1) * 8 = 8 bytes
+
+        // TCP Header (offset 62)
+        frame[62..64].copy_from_slice(&44332u16.to_be_bytes());
+        frame[64..66].copy_from_slice(&80u16.to_be_bytes());
+        frame[74] = 0x50; // Data offset 20
+        frame[75] = 0x02; // SYN flag
+
+        let local_ips = Arc::new(Mutex::new(Vec::new()));
+        let res = LiveTrafficSniffer::parse_ethernet_frame(&frame, &counter, &local_ips)
+            .expect("Must parse IPv6 with extension header");
+        assert_eq!(res.protocol, "TCP");
+        assert_eq!(res.src_port, Some(44332));
+        assert_eq!(res.dst_port, Some(80));
+        assert_eq!(res.tcp_flags, Some(0x02));
+    }
+
+    #[test]
+    fn test_parse_vlan_8021q_frame() {
+        let counter = AtomicU64::new(0);
+        let mut frame = vec![0u8; 58]; // 14 eth + 4 vlan + 40 ipv4-tcp
+        frame[12..14].copy_from_slice(&0x8100u16.to_be_bytes()); // 802.1Q VLAN
+        frame[14..16].copy_from_slice(&100u16.to_be_bytes()); // VLAN ID 100
+        frame[16..18].copy_from_slice(&0x0800u16.to_be_bytes()); // Inner EtherType: IPv4
+
+        // IPv4 Header at offset 18
+        frame[18] = 0x45;
+        frame[20..22].copy_from_slice(&40u16.to_be_bytes());
+        frame[27] = 6; // TCP
+        frame[30..34].copy_from_slice(&[192, 168, 1, 10]);
+        frame[34..38].copy_from_slice(&[192, 168, 1, 20]);
+
+        // TCP at offset 38
+        frame[38..40].copy_from_slice(&1234u16.to_be_bytes());
+        frame[40..42].copy_from_slice(&80u16.to_be_bytes());
+        frame[50] = 0x50;
+        frame[51] = 0x10; // ACK
+
+        let local_ips = Arc::new(Mutex::new(Vec::new()));
+        let res = LiveTrafficSniffer::parse_ethernet_frame(&frame, &counter, &local_ips)
+            .expect("Must parse 802.1Q tagged frame");
+        assert_eq!(res.protocol, "TCP");
+        assert_eq!(res.src_port, Some(1234));
+        assert_eq!(res.dst_port, Some(80));
+        assert_eq!(res.tcp_flags, Some(0x10));
     }
 }

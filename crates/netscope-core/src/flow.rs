@@ -26,9 +26,12 @@ impl std::fmt::Display for FlowProtocol {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum FlowState {
     New,
+    SynSent,
+    SynAckReceived,
     Established,
     Closing,
     Closed,
+    Reset,
     Timeout,
 }
 
@@ -36,9 +39,12 @@ impl std::fmt::Display for FlowState {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::New => write!(f, "New"),
+            Self::SynSent => write!(f, "SYN-Sent"),
+            Self::SynAckReceived => write!(f, "SYN-ACK-Received"),
             Self::Established => write!(f, "Established"),
             Self::Closing => write!(f, "Closing"),
             Self::Closed => write!(f, "Closed"),
+            Self::Reset => write!(f, "Reset"),
             Self::Timeout => write!(f, "Timeout"),
         }
     }
@@ -102,12 +108,21 @@ pub struct NetworkFlow {
     pub packets_a_to_b: u64,
     pub packets_b_to_a: u64,
     pub state: FlowState,
+    pub syn_from_a: bool,
+    pub syn_from_b: bool,
+    pub fin_from_a: bool,
+    pub fin_from_b: bool,
 }
 
 impl NetworkFlow {
-    pub fn new(key: CanonicalFlowKey, bytes: usize, is_forward: bool) -> Self {
-        let now = Utc::now();
-        Self {
+    pub fn new(
+        key: CanonicalFlowKey,
+        bytes: usize,
+        is_forward: bool,
+        tcp_flags: Option<u8>,
+        now: DateTime<Utc>,
+    ) -> Self {
+        let mut flow = Self {
             key,
             start_time: now,
             last_seen: now,
@@ -116,11 +131,40 @@ impl NetworkFlow {
             packets_a_to_b: if is_forward { 1 } else { 0 },
             packets_b_to_a: if !is_forward { 1 } else { 0 },
             state: FlowState::New,
+            syn_from_a: false,
+            syn_from_b: false,
+            fin_from_a: false,
+            fin_from_b: false,
+        };
+
+        if flow.key.protocol == FlowProtocol::Tcp {
+            if let Some(flags) = tcp_flags {
+                if flags & 0x04 != 0 {
+                    // RST
+                    flow.state = FlowState::Reset;
+                } else if (flags & 0x02) != 0 && (flags & 0x10) == 0 {
+                    // Client SYN
+                    if is_forward {
+                        flow.syn_from_a = true;
+                    } else {
+                        flow.syn_from_b = true;
+                    }
+                    flow.state = FlowState::SynSent;
+                }
+            }
         }
+
+        flow
     }
 
-    pub fn update(&mut self, bytes: usize, is_forward: bool, tcp_flags: Option<u8>) {
-        self.last_seen = Utc::now();
+    pub fn update(
+        &mut self,
+        bytes: usize,
+        is_forward: bool,
+        tcp_flags: Option<u8>,
+        now: DateTime<Utc>,
+    ) {
+        self.last_seen = now;
         if is_forward {
             self.packets_a_to_b += 1;
             self.bytes_a_to_b += bytes as u64;
@@ -129,17 +173,76 @@ impl NetworkFlow {
             self.bytes_b_to_a += bytes as u64;
         }
 
-        if let Some(flags) = tcp_flags {
-            // TCP Flag handling: SYN=0x02, ACK=0x10, FIN=0x01, RST=0x04
-            if flags & 0x04 != 0 {
-                self.state = FlowState::Closed;
-            } else if flags & 0x01 != 0 {
-                self.state = FlowState::Closing;
-            } else if (flags & 0x12) == 0x12 || (self.packets_a_to_b > 1 && self.packets_b_to_a > 1)
-            {
-                self.state = FlowState::Established;
+        if self.key.protocol == FlowProtocol::Tcp {
+            if let Some(flags) = tcp_flags {
+                let is_fin = (flags & 0x01) != 0;
+                let is_syn = (flags & 0x02) != 0;
+                let is_rst = (flags & 0x04) != 0;
+                let is_ack = (flags & 0x10) != 0;
+
+                if is_rst {
+                    self.state = FlowState::Reset;
+                } else if is_fin {
+                    if is_forward {
+                        self.fin_from_a = true;
+                    } else {
+                        self.fin_from_b = true;
+                    }
+                    if self.fin_from_a && self.fin_from_b {
+                        self.state = FlowState::Closed;
+                    } else {
+                        self.state = FlowState::Closing;
+                    }
+                } else if is_syn {
+                    if is_ack {
+                        // SYN-ACK (Server response)
+                        if is_forward {
+                            self.syn_from_a = true;
+                        } else {
+                            self.syn_from_b = true;
+                        }
+                        if self.state == FlowState::SynSent || self.state == FlowState::New {
+                            self.state = FlowState::SynAckReceived;
+                        }
+                    } else {
+                        // Retransmitted or new SYN
+                        if is_forward {
+                            self.syn_from_a = true;
+                        } else {
+                            self.syn_from_b = true;
+                        }
+                        if self.state == FlowState::New {
+                            self.state = FlowState::SynSent;
+                        }
+                    }
+                } else if is_ack {
+                    if self.state == FlowState::SynAckReceived {
+                        // Handshake completion (Client sends ACK back to server)
+                        let is_client_ack = if self.syn_from_a && !self.syn_from_b {
+                            is_forward
+                        } else if self.syn_from_b && !self.syn_from_a {
+                            !is_forward
+                        } else {
+                            true
+                        };
+                        if is_client_ack {
+                            self.state = FlowState::Established;
+                        }
+                    } else if self.state == FlowState::Closing {
+                        if (is_forward && self.fin_from_b) || (!is_forward && self.fin_from_a) {
+                            self.state = FlowState::Closed;
+                        }
+                    } else if self.state == FlowState::New
+                        && self.packets_a_to_b >= 1
+                        && self.packets_b_to_a >= 1
+                    {
+                        // Mid-stream pickup: established connection observed without initial handshake
+                        self.state = FlowState::Established;
+                    }
+                }
             }
-        } else if self.packets_a_to_b > 0 && self.packets_b_to_a > 0 {
+        } else if self.packets_a_to_b >= 1 && self.packets_b_to_a >= 1 {
+            // UDP or ICMP bidirectional traffic
             self.state = FlowState::Established;
         }
     }
@@ -185,15 +288,43 @@ impl FlowTracker {
         length_bytes: usize,
         tcp_flags: Option<u8>,
     ) {
+        self.process_packet_with_time(
+            src_ip,
+            src_port,
+            dst_ip,
+            dst_port,
+            protocol,
+            length_bytes,
+            tcp_flags,
+            Utc::now(),
+        );
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn process_packet_with_time(
+        &mut self,
+        src_ip: IpAddr,
+        src_port: u16,
+        dst_ip: IpAddr,
+        dst_port: u16,
+        protocol: FlowProtocol,
+        length_bytes: usize,
+        tcp_flags: Option<u8>,
+        now: DateTime<Utc>,
+    ) {
+        if self.max_flows == 0 {
+            return; // Capacity limit of zero enforced
+        }
+
         let (key, is_forward) = CanonicalFlowKey::new(src_ip, src_port, dst_ip, dst_port, protocol);
 
         if let Some(flow) = self.flows.get_mut(&key) {
-            flow.update(length_bytes, is_forward, tcp_flags);
+            flow.update(length_bytes, is_forward, tcp_flags, now);
         } else {
             if self.flows.len() >= self.max_flows {
-                self.cleanup_expired();
+                self.cleanup_expired_at(now);
                 if self.flows.len() >= self.max_flows {
-                    // Evict oldest flow
+                    // Predictable LRU eviction: evict oldest flow
                     if let Some(oldest_key) = self
                         .flows
                         .iter()
@@ -204,13 +335,18 @@ impl FlowTracker {
                     }
                 }
             }
-            self.flows
-                .insert(key.clone(), NetworkFlow::new(key, length_bytes, is_forward));
+            self.flows.insert(
+                key.clone(),
+                NetworkFlow::new(key, length_bytes, is_forward, tcp_flags, now),
+            );
         }
     }
 
     pub fn cleanup_expired(&mut self) -> usize {
-        let now = Utc::now();
+        self.cleanup_expired_at(Utc::now())
+    }
+
+    pub fn cleanup_expired_at(&mut self, now: DateTime<Utc>) -> usize {
         let tcp_timeout = self.tcp_timeout_secs;
         let udp_timeout = self.udp_timeout_secs;
 
@@ -219,7 +355,7 @@ impl FlowTracker {
             let age = (now - flow.last_seen).num_seconds();
             match flow.key.protocol {
                 FlowProtocol::Tcp => {
-                    if flow.state == FlowState::Closed {
+                    if flow.state == FlowState::Closed || flow.state == FlowState::Reset {
                         age < 15
                     } else {
                         age < tcp_timeout
@@ -238,26 +374,24 @@ impl FlowTracker {
         list
     }
 
-    pub fn count(&self) -> usize {
+    pub fn len(&self) -> usize {
         self.flows.len()
     }
-}
 
-impl Default for FlowTracker {
-    fn default() -> Self {
-        Self::new(10000)
+    pub fn is_empty(&self) -> bool {
+        self.flows.is_empty()
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::net::Ipv4Addr;
+    use std::str::FromStr;
 
     #[test]
     fn test_canonical_flow_symmetry() {
-        let ip_a = IpAddr::V4(Ipv4Addr::new(192, 168, 1, 10));
-        let ip_b = IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1));
+        let ip_a = IpAddr::from_str("192.168.1.100").unwrap();
+        let ip_b = IpAddr::from_str("142.250.190.46").unwrap();
 
         let (key1, fwd1) = CanonicalFlowKey::new(ip_a, 50000, ip_b, 443, FlowProtocol::Tcp);
         let (key2, fwd2) = CanonicalFlowKey::new(ip_b, 443, ip_a, 50000, FlowProtocol::Tcp);
@@ -267,40 +401,190 @@ mod tests {
     }
 
     #[test]
-    fn test_flow_tracker_bidirectional_aggregation() {
+    fn test_tcp_three_way_handshake_state_machine() {
+        let ip_client = IpAddr::from_str("192.168.1.50").unwrap();
+        let ip_server = IpAddr::from_str("93.184.216.34").unwrap();
         let mut tracker = FlowTracker::new(100);
-        let ip_client = IpAddr::V4(Ipv4Addr::new(192, 168, 1, 5));
-        let ip_server = IpAddr::V4(Ipv4Addr::new(93, 184, 216, 34));
+        let now = Utc::now();
 
-        // SYN from client
-        tracker.process_packet(
+        // 1. Client sends SYN (0x02)
+        tracker.process_packet_with_time(
             ip_client,
-            40000,
+            49152,
             ip_server,
             80,
             FlowProtocol::Tcp,
             60,
             Some(0x02),
+            now,
         );
-        assert_eq!(tracker.count(), 1);
+        let flows = tracker.active_flows();
+        assert_eq!(flows.len(), 1);
+        assert_eq!(flows[0].state, FlowState::SynSent);
+        assert_eq!(flows[0].packets_a_to_b + flows[0].packets_b_to_a, 1);
 
-        // SYN-ACK from server
-        tracker.process_packet(
+        // 2. Server responds with SYN-ACK (0x12)
+        tracker.process_packet_with_time(
             ip_server,
             80,
             ip_client,
-            40000,
+            49152,
             FlowProtocol::Tcp,
             60,
             Some(0x12),
+            now,
         );
-        assert_eq!(tracker.count(), 1);
+        let flows = tracker.active_flows();
+        // MUST NOT be Established after 2 packets!
+        assert_eq!(flows[0].state, FlowState::SynAckReceived);
+        assert_eq!(flows[0].packets_a_to_b + flows[0].packets_b_to_a, 2);
+
+        // 3. Client sends ACK (0x10) to finalize handshake
+        tracker.process_packet_with_time(
+            ip_client,
+            49152,
+            ip_server,
+            80,
+            FlowProtocol::Tcp,
+            52,
+            Some(0x10),
+            now,
+        );
+        let flows = tracker.active_flows();
+        assert_eq!(flows[0].state, FlowState::Established);
+        assert_eq!(flows[0].packets_a_to_b + flows[0].packets_b_to_a, 3);
+    }
+
+    #[test]
+    fn test_tcp_reset_transitions_to_reset() {
+        let ip_a = IpAddr::from_str("10.0.0.1").unwrap();
+        let ip_b = IpAddr::from_str("10.0.0.2").unwrap();
+        let mut tracker = FlowTracker::new(10);
+        let now = Utc::now();
+
+        tracker.process_packet_with_time(
+            ip_a,
+            1234,
+            ip_b,
+            80,
+            FlowProtocol::Tcp,
+            60,
+            Some(0x02),
+            now,
+        );
+        tracker.process_packet_with_time(
+            ip_b,
+            80,
+            ip_a,
+            1234,
+            FlowProtocol::Tcp,
+            60,
+            Some(0x04),
+            now,
+        ); // RST
 
         let flows = tracker.active_flows();
-        assert_eq!(flows.len(), 1);
-        let flow = &flows[0];
-        assert_eq!(flow.total_packets(), 2);
-        assert_eq!(flow.total_bytes(), 120);
-        assert_eq!(flow.state, FlowState::Established);
+        assert_eq!(flows[0].state, FlowState::Reset);
+    }
+
+    #[test]
+    fn test_tcp_fin_teardown_transitions_to_closing_and_closed() {
+        let ip_a = IpAddr::from_str("10.0.0.1").unwrap();
+        let ip_b = IpAddr::from_str("10.0.0.2").unwrap();
+        let mut tracker = FlowTracker::new(10);
+        let now = Utc::now();
+
+        // 3-way handshake
+        tracker.process_packet_with_time(
+            ip_a,
+            1234,
+            ip_b,
+            80,
+            FlowProtocol::Tcp,
+            60,
+            Some(0x02),
+            now,
+        );
+        tracker.process_packet_with_time(
+            ip_b,
+            80,
+            ip_a,
+            1234,
+            FlowProtocol::Tcp,
+            60,
+            Some(0x12),
+            now,
+        );
+        tracker.process_packet_with_time(
+            ip_a,
+            1234,
+            ip_b,
+            80,
+            FlowProtocol::Tcp,
+            52,
+            Some(0x10),
+            now,
+        );
+        assert_eq!(tracker.active_flows()[0].state, FlowState::Established);
+
+        // Client FIN (0x01)
+        tracker.process_packet_with_time(
+            ip_a,
+            1234,
+            ip_b,
+            80,
+            FlowProtocol::Tcp,
+            52,
+            Some(0x01),
+            now,
+        );
+        assert_eq!(tracker.active_flows()[0].state, FlowState::Closing);
+
+        // Server FIN (0x01)
+        tracker.process_packet_with_time(
+            ip_b,
+            80,
+            ip_a,
+            1234,
+            FlowProtocol::Tcp,
+            52,
+            Some(0x01),
+            now,
+        );
+        assert_eq!(tracker.active_flows()[0].state, FlowState::Closed);
+    }
+
+    #[test]
+    fn test_max_flows_zero_enforced() {
+        let ip_a = IpAddr::from_str("10.0.0.1").unwrap();
+        let ip_b = IpAddr::from_str("10.0.0.2").unwrap();
+        let mut tracker = FlowTracker::new(0);
+
+        tracker.process_packet(ip_a, 1234, ip_b, 80, FlowProtocol::Tcp, 60, Some(0x02));
+        assert_eq!(tracker.len(), 0);
+    }
+
+    #[test]
+    fn test_predictable_lru_eviction() {
+        let ip_a = IpAddr::from_str("10.0.0.1").unwrap();
+        let ip_b = IpAddr::from_str("10.0.0.2").unwrap();
+        let mut tracker = FlowTracker::new(2);
+        let t0 = Utc::now();
+        let t1 = t0 + chrono::Duration::seconds(5);
+        let t2 = t0 + chrono::Duration::seconds(10);
+
+        tracker.process_packet_with_time(ip_a, 1001, ip_b, 80, FlowProtocol::Udp, 50, None, t0);
+        tracker.process_packet_with_time(ip_a, 1002, ip_b, 80, FlowProtocol::Udp, 50, None, t1);
+        assert_eq!(tracker.len(), 2);
+
+        // Third flow arrives at t2: oldest flow (port 1001) should be evicted
+        tracker.process_packet_with_time(ip_a, 1003, ip_b, 80, FlowProtocol::Udp, 50, None, t2);
+        assert_eq!(tracker.len(), 2);
+
+        let flows = tracker.active_flows();
+        let ports: Vec<u16> = flows.iter().map(|f| f.key.endpoint_a.1).collect();
+        assert!(!ports.contains(&1001));
+        assert!(ports.contains(&1002));
+        assert!(ports.contains(&1003));
     }
 }

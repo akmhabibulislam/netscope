@@ -3,13 +3,14 @@ use netscope_core::{
     AlertSeverity, BandwidthSample, DnsRecord, NetworkEvent, SecurityAlert, TimelineEventType,
 };
 use rusqlite::{params, Connection};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use tracing::info;
 
 #[derive(Clone)]
 pub struct StorageManager {
     conn: Arc<Mutex<Connection>>,
+    db_path: Option<PathBuf>,
 }
 
 impl StorageManager {
@@ -26,7 +27,7 @@ impl StorageManager {
         };
 
         info!("Initializing NetScope SQLite database at {:?}", path);
-        let conn = Connection::open(path)?;
+        let conn = Connection::open(&path)?;
 
         // Pragmas for performance and data safety
         conn.execute_batch(
@@ -37,6 +38,7 @@ impl StorageManager {
 
         let manager = Self {
             conn: Arc::new(Mutex::new(conn)),
+            db_path: Some(path),
         };
 
         manager.migrate()?;
@@ -47,13 +49,28 @@ impl StorageManager {
         let conn = Connection::open_in_memory()?;
         let manager = Self {
             conn: Arc::new(Mutex::new(conn)),
+            db_path: None,
         };
         manager.migrate()?;
         Ok(manager)
     }
 
+    pub fn is_in_memory(&self) -> bool {
+        self.db_path.is_none()
+    }
+
+    pub fn db_path(&self) -> Option<&Path> {
+        self.db_path.as_deref()
+    }
+
+    fn lock_conn(&self) -> Result<std::sync::MutexGuard<'_, Connection>, anyhow::Error> {
+        self.conn
+            .lock()
+            .map_err(|e| anyhow::anyhow!("Storage mutex poisoned: {}", e))
+    }
+
     fn migrate(&self) -> Result<(), anyhow::Error> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn()?;
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS bandwidth_samples (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -72,7 +89,8 @@ impl StorageManager {
                 qtype TEXT NOT NULL,
                 response TEXT,
                 resolver TEXT NOT NULL,
-                duration_ms INTEGER
+                duration_ms INTEGER,
+                process_name TEXT
             );
 
             CREATE TABLE IF NOT EXISTS security_alerts (
@@ -107,7 +125,7 @@ impl StorageManager {
     }
 
     pub fn insert_bandwidth_sample(&self, sample: &BandwidthSample) -> Result<(), anyhow::Error> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn()?;
         conn.execute(
             "INSERT INTO bandwidth_samples (timestamp, rx_bytes_total, tx_bytes_total, rx_speed_bps, tx_speed_bps, active_interface)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
@@ -120,14 +138,21 @@ impl StorageManager {
                 sample.active_interface
             ],
         )?;
+
+        // Amortized bounded retention: keep up to 10,000 samples to prevent unbounded database growth
+        let _ = conn.execute(
+            "DELETE FROM bandwidth_samples WHERE id < (SELECT max(id) - 10000 FROM bandwidth_samples)",
+            [],
+        );
+
         Ok(())
     }
 
     pub fn insert_dns_record(&self, record: &DnsRecord) -> Result<(), anyhow::Error> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn()?;
         conn.execute(
-            "INSERT OR REPLACE INTO dns_history (id, timestamp, query, qtype, response, resolver, duration_ms)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            "INSERT OR REPLACE INTO dns_history (id, timestamp, query, qtype, response, resolver, duration_ms, process_name)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             params![
                 record.id,
                 record.timestamp.to_rfc3339(),
@@ -135,14 +160,15 @@ impl StorageManager {
                 record.qtype,
                 record.response,
                 record.resolver,
-                record.duration_ms
+                record.duration_ms,
+                record.process_name
             ],
         )?;
         Ok(())
     }
 
     pub fn insert_alert(&self, alert: &SecurityAlert) -> Result<(), anyhow::Error> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn()?;
         conn.execute(
             "INSERT OR REPLACE INTO security_alerts (id, timestamp, severity, title, message, rule_id, affected_process, remote_ip, remote_port, reviewed)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
@@ -163,7 +189,7 @@ impl StorageManager {
     }
 
     pub fn insert_event(&self, event: &NetworkEvent) -> Result<(), anyhow::Error> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn()?;
         conn.execute(
             "INSERT OR REPLACE INTO network_events (id, timestamp, event_type, title, details, process, ip_or_domain)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
@@ -181,7 +207,7 @@ impl StorageManager {
     }
 
     pub fn get_recent_events(&self, limit: usize) -> Result<Vec<NetworkEvent>, anyhow::Error> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn()?;
         let mut stmt = conn.prepare(
             "SELECT id, timestamp, event_type, title, details, process, ip_or_domain
              FROM network_events ORDER BY timestamp DESC LIMIT ?1",
@@ -225,7 +251,7 @@ impl StorageManager {
     }
 
     pub fn get_recent_samples(&self, limit: usize) -> Result<Vec<BandwidthSample>, anyhow::Error> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn()?;
         let mut stmt = conn.prepare(
             "SELECT timestamp, rx_bytes_total, tx_bytes_total, rx_speed_bps, tx_speed_bps, active_interface
              FROM bandwidth_samples ORDER BY id DESC LIMIT ?1",
@@ -255,7 +281,7 @@ impl StorageManager {
     }
 
     pub fn get_recent_alerts(&self, limit: usize) -> Result<Vec<SecurityAlert>, anyhow::Error> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn()?;
         let mut stmt = conn.prepare(
             "SELECT id, timestamp, severity, title, message, rule_id, affected_process, remote_ip, remote_port, reviewed
              FROM security_alerts ORDER BY timestamp DESC LIMIT ?1",
@@ -269,34 +295,29 @@ impl StorageManager {
                 .unwrap_or_else(|_| Utc::now());
             let sev_str: String = row.get(2)?;
             let severity = match sev_str.as_str() {
-                "INFO" => AlertSeverity::Info,
-                "LOW" => AlertSeverity::Low,
-                "MEDIUM" => AlertSeverity::Medium,
-                "HIGH" => AlertSeverity::High,
-                "CRITICAL" => AlertSeverity::Critical,
+                "Critical" => AlertSeverity::Critical,
+                "High" => AlertSeverity::High,
+                "Medium" => AlertSeverity::Medium,
+                "Low" => AlertSeverity::Low,
                 _ => AlertSeverity::Info,
             };
-            let title: String = row.get(3)?;
-            let message: String = row.get(4)?;
-            let rule_id: String = row.get(5)?;
-            let affected_process: Option<String> = row.get(6)?;
+
             let remote_ip_str: Option<String> = row.get(7)?;
             let remote_ip = remote_ip_str.and_then(|s| s.parse().ok());
-            let remote_port: Option<u16> = row.get(8)?;
-            let reviewed: bool = row.get::<_, i32>(9)? != 0;
+            let reviewed_int: i32 = row.get(9)?;
 
             Ok(SecurityAlert {
                 id,
                 timestamp: ts,
                 severity,
-                title,
-                message,
-                rule_id,
-                affected_process,
+                title: row.get(3)?,
+                message: row.get(4)?,
+                rule_id: row.get(5)?,
+                affected_process: row.get(6)?,
                 remote_ip,
-                remote_port,
+                remote_port: row.get(8)?,
                 recommendations: Vec::new(),
-                reviewed,
+                reviewed: reviewed_int == 1,
             })
         })?;
 
@@ -305,6 +326,38 @@ impl StorageManager {
             alerts.push(r?);
         }
         Ok(alerts)
+    }
+
+    pub fn get_recent_dns(&self, limit: usize) -> Result<Vec<DnsRecord>, anyhow::Error> {
+        let conn = self.lock_conn()?;
+        let mut stmt = conn.prepare(
+            "SELECT id, timestamp, query, qtype, response, resolver, duration_ms, process_name
+             FROM dns_history ORDER BY timestamp DESC LIMIT ?1",
+        )?;
+
+        let rows = stmt.query_map([limit], |row| {
+            let id: String = row.get(0)?;
+            let ts_str: String = row.get(1)?;
+            let ts = DateTime::parse_from_rfc3339(&ts_str)
+                .map(|dt| dt.with_timezone(&Utc))
+                .unwrap_or_else(|_| Utc::now());
+            Ok(DnsRecord {
+                id,
+                timestamp: ts,
+                query: row.get(2)?,
+                qtype: row.get(3)?,
+                response: row.get(4)?,
+                resolver: row.get(5)?,
+                duration_ms: row.get(6)?,
+                process_name: row.get(7)?,
+            })
+        })?;
+
+        let mut records = Vec::new();
+        for r in rows {
+            records.push(r?);
+        }
+        Ok(records)
     }
 
     pub fn export_alerts_csv(&self) -> Result<String, anyhow::Error> {
@@ -316,14 +369,14 @@ impl StorageManager {
             "Severity",
             "Title",
             "Message",
-            "Rule",
+            "Rule ID",
             "Process",
             "Remote IP",
             "Remote Port",
-            "Reviewed",
         ])?;
+
         for a in alerts {
-            wtr.write_record(&[
+            wtr.write_record([
                 a.id,
                 a.timestamp.to_rfc3339(),
                 a.severity.to_string(),
@@ -333,9 +386,36 @@ impl StorageManager {
                 a.affected_process.unwrap_or_default(),
                 a.remote_ip.map(|ip| ip.to_string()).unwrap_or_default(),
                 a.remote_port.map(|p| p.to_string()).unwrap_or_default(),
-                a.reviewed.to_string(),
             ])?;
         }
+
+        let data = String::from_utf8(wtr.into_inner()?)?;
+        Ok(data)
+    }
+
+    pub fn export_bandwidth_csv(&self) -> Result<String, anyhow::Error> {
+        let samples = self.get_recent_samples(5000)?;
+        let mut wtr = csv::Writer::from_writer(vec![]);
+        wtr.write_record([
+            "Timestamp",
+            "Rx Bytes Total",
+            "Tx Bytes Total",
+            "Rx Speed (bps)",
+            "Tx Speed (bps)",
+            "Interface",
+        ])?;
+
+        for s in samples {
+            wtr.write_record([
+                s.timestamp.to_rfc3339(),
+                s.rx_bytes_total.to_string(),
+                s.tx_bytes_total.to_string(),
+                s.rx_speed_bps.to_string(),
+                s.tx_speed_bps.to_string(),
+                s.active_interface.unwrap_or_default(),
+            ])?;
+        }
+
         let data = String::from_utf8(wtr.into_inner()?)?;
         Ok(data)
     }
@@ -374,5 +454,59 @@ impl StorageManager {
         html.push_str("</table></body></html>");
 
         Ok(html)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_storage_manager_in_memory_migration_and_roundtrip() {
+        let storage = StorageManager::new_in_memory().unwrap();
+        assert!(storage.is_in_memory());
+
+        let sample = BandwidthSample {
+            timestamp: Utc::now(),
+            rx_bytes_total: 1024,
+            tx_bytes_total: 2048,
+            rx_speed_bps: 8192.0,
+            tx_speed_bps: 16384.0,
+            active_interface: Some("eth0".to_string()),
+        };
+
+        storage.insert_bandwidth_sample(&sample).unwrap();
+        let samples = storage.get_recent_samples(10).unwrap();
+        assert_eq!(samples.len(), 1);
+        assert_eq!(samples[0].active_interface.as_deref(), Some("eth0"));
+    }
+
+    #[test]
+    fn test_storage_manager_disk_roundtrip() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let db_path = temp_dir.path().join("test_netscope.sqlite");
+
+        let storage = StorageManager::new(Some(db_path.clone())).unwrap();
+        assert!(!storage.is_in_memory());
+        assert_eq!(storage.db_path().unwrap(), db_path);
+
+        let alert = SecurityAlert {
+            id: "ALERT-1".to_string(),
+            timestamp: Utc::now(),
+            severity: AlertSeverity::High,
+            title: "Test Alert".to_string(),
+            message: "Test Message".to_string(),
+            rule_id: "RULE_TEST".to_string(),
+            affected_process: Some("curl".to_string()),
+            remote_ip: None,
+            remote_port: Some(80),
+            recommendations: vec![],
+            reviewed: false,
+        };
+
+        storage.insert_alert(&alert).unwrap();
+        let alerts = storage.get_recent_alerts(5).unwrap();
+        assert_eq!(alerts.len(), 1);
+        assert_eq!(alerts[0].id, "ALERT-1");
     }
 }

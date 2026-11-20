@@ -8,10 +8,10 @@ use parking_lot::RwLock;
 use std::sync::Arc;
 
 #[derive(Clone)]
-#[allow(dead_code)]
 pub struct AppState {
     pub collector: NetworkCollector,
     pub storage: StorageManager,
+    pub storage_degraded_warning: Arc<RwLock<Option<String>>>,
     pub rule_engine: Arc<RwLock<SecurityRuleEngine>>,
     pub sniffer: LiveTrafficSniffer,
     pub quota: Arc<RwLock<DataUsageQuota>>,
@@ -22,11 +22,34 @@ pub struct AppState {
 impl AppState {
     pub fn new() -> Self {
         let collector = NetworkCollector::new();
-        let storage =
-            StorageManager::new(None).unwrap_or_else(|_| StorageManager::new_in_memory().unwrap());
+
+        let (storage, storage_degraded_warning) = match StorageManager::new(None) {
+            Ok(s) => (s, Arc::new(RwLock::new(None))),
+            Err(e) => {
+                let warn_msg = format!(
+                    "Persistent database unavailable ({}). Running with temporary in-memory storage; historical telemetry will not persist across restarts.",
+                    e
+                );
+                tracing::warn!("{}", warn_msg);
+                let in_mem = StorageManager::new_in_memory().unwrap_or_else(|e2| {
+                    panic!(
+                        "Critical storage initialization failure: unable to create in-memory SQLite: {}",
+                        e2
+                    );
+                });
+                (in_mem, Arc::new(RwLock::new(Some(warn_msg))))
+            }
+        };
+
         let rule_engine = Arc::new(RwLock::new(SecurityRuleEngine::new(vec![], vec![])));
         let sniffer = LiveTrafficSniffer::new();
-        let _ = sniffer.start_capture();
+
+        if let Err(e) = sniffer.start_capture() {
+            tracing::info!(
+                "Initial raw packet capture did not start automatically (non-fatal): {}",
+                e
+            );
+        }
 
         let quota = Arc::new(RwLock::new(DataUsageQuota::new(
             netscope_core::QuotaPeriod::Daily,
@@ -38,6 +61,7 @@ impl AppState {
         Self {
             collector,
             storage,
+            storage_degraded_warning,
             rule_engine,
             sniffer,
             quota,

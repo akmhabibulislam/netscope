@@ -28,4 +28,5 @@ pub struct CapturedPacketSummary {
     pub dst_port: Option<u16>,
     pub length_bytes: usize,
     pub summary: String,
+    pub tcp_flags: Option<u8>,
 }

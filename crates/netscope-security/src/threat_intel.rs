@@ -160,10 +160,11 @@ impl ThreatIntel {
         }
     }
 
-    /// Persist current threat intelligence entries to disk
+    /// Persist current threat intelligence entries to disk atomically via temporary file replacement
     pub fn save_to_disk(&self) -> Result<(), String> {
         if let Some(parent) = self.storage_path.parent() {
-            let _ = fs::create_dir_all(parent);
+            fs::create_dir_all(parent)
+                .map_err(|e| format!("Failed to create directory {:?}: {}", parent, e))?;
         }
 
         let feed = ThreatFeedFile {
@@ -175,7 +176,18 @@ impl ThreatIntel {
 
         let json = serde_json::to_string_pretty(&feed)
             .map_err(|e| format!("Serialization error: {}", e))?;
-        fs::write(&self.storage_path, json).map_err(|e| format!("Disk write error: {}", e))?;
+
+        let temp_path = self.storage_path.with_extension("tmp");
+        fs::write(&temp_path, json.as_bytes())
+            .map_err(|e| format!("Disk write error to {:?}: {}", temp_path, e))?;
+
+        fs::rename(&temp_path, &self.storage_path).map_err(|e| {
+            format!(
+                "Atomic rename error from {:?} to {:?}: {}",
+                temp_path, self.storage_path, e
+            )
+        })?;
+
         Ok(())
     }
 
@@ -190,7 +202,7 @@ impl ThreatIntel {
         for entry in feed.entries {
             self.feed_entries.insert(entry.ip, entry);
         }
-        let _ = self.save_to_disk();
+        self.save_to_disk()?;
         Ok(count)
     }
 

@@ -47,7 +47,13 @@ fn load_css() {
 }
 
 fn build_ui(app: &Application) {
-    let rt = Arc::new(Runtime::new().unwrap());
+    let rt = match Runtime::new() {
+        Ok(r) => Arc::new(r),
+        Err(e) => {
+            eprintln!("Failed to initialize Tokio runtime for NetScope: {}", e);
+            return;
+        }
+    };
     let state = AppState::new();
 
     let window = ApplicationWindow::builder()
@@ -56,6 +62,12 @@ fn build_ui(app: &Application) {
         .default_width(1280)
         .default_height(820)
         .build();
+
+    let sniffer_close = state.sniffer.clone();
+    window.connect_close_request(move |_| {
+        sniffer_close.stop_capture();
+        glib::Propagation::Proceed
+    });
 
     // Top HeaderBar with Linear styling
     let header_bar = HeaderBar::new();
@@ -116,7 +128,7 @@ fn build_ui(app: &Application) {
     stack.add_titled(&investigate_view, Some("investigate"), "Investigation");
 
     // 7. Internet Speed & Throughput Benchmark
-    let speed_view = create_speedtest_page(rt.clone());
+    let speed_view = create_speedtest_page(&state, rt.clone());
     stack.add_titled(&speed_view, Some("speedtest"), "Speed & Benchmark");
 
     // 8. Wi-Fi & RF Intelligence
@@ -215,6 +227,20 @@ fn create_dashboard_page(state: &AppState, rt: Arc<Runtime>) -> (GtkBox, Rc<dyn 
     header_box.append(&title);
     container.append(&header_box);
 
+    // Degraded storage warning banner if SQLite disk open failed
+    if let Some(ref warn_text) = *state.storage_degraded_warning.read() {
+        let warn_box = GtkBox::new(Orientation::Horizontal, 8);
+        warn_box.add_css_class("card");
+        let warn_icon = Label::new(Some("⚠️ Storage Degraded:"));
+        warn_icon.add_css_class("accent-amber");
+        let warn_label = Label::new(Some(warn_text));
+        warn_label.set_wrap(true);
+        warn_label.set_halign(gtk4::Align::Start);
+        warn_box.append(&warn_icon);
+        warn_box.append(&warn_label);
+        container.append(&warn_box);
+    }
+
     // Primary Metric Cards
     let grid_box = GtkBox::new(Orientation::Horizontal, 12);
     grid_box.set_homogeneous(true);
@@ -258,11 +284,24 @@ fn create_dashboard_page(state: &AppState, rt: Arc<Runtime>) -> (GtkBox, Rc<dyn 
     let state_clone = state.clone();
     let graph_clone = graph.clone();
     let rt_clone = rt.clone();
+    let in_flight = Arc::new(std::sync::atomic::AtomicBool::new(false));
 
     let update_fn: Rc<dyn Fn()> = Rc::new(move || {
+        if in_flight
+            .compare_exchange(
+                false,
+                true,
+                std::sync::atomic::Ordering::AcqRel,
+                std::sync::atomic::Ordering::Relaxed,
+            )
+            .is_err()
+        {
+            return; // Prevent task buildup if previous tick is still active
+        }
+
         let st = state_clone.clone();
         let gr = graph_clone.clone();
-        let rt = rt_clone.clone();
+        let in_flight_clone = in_flight.clone();
 
         let if_val = iface_val.clone();
         let r_val = rx_val.clone();
@@ -271,13 +310,10 @@ fn create_dashboard_page(state: &AppState, rt: Arc<Runtime>) -> (GtkBox, Rc<dyn 
         let if_det = iface_detail.clone();
 
         let (sender, receiver) = async_channel::bounded(1);
-        std::thread::spawn(move || {
-            let res = rt.block_on(async {
-                let s = st.collector.collect_bandwidth_sample().await;
-                let ifs = st.collector.poll_interfaces().await;
-                (s, ifs, st)
-            });
-            let _ = sender.send_blocking(res);
+        rt_clone.spawn(async move {
+            let s = st.collector.collect_bandwidth_sample().await;
+            let ifs = st.collector.poll_interfaces().await;
+            let _ = sender.send((s, ifs, st)).await;
         });
 
         glib::spawn_future_local(async move {
@@ -295,7 +331,8 @@ fn create_dashboard_page(state: &AppState, rt: Arc<Runtime>) -> (GtkBox, Rc<dyn 
                 t_val.set_text(&format!("{:.2} KB/s", sample.tx_speed_bps / 8000.0));
 
                 let used_mb = (sample.rx_bytes_total + sample.tx_bytes_total) / (1024 * 1024);
-                q_val.set_text(&format!("{} MB / 5.0 GB", used_mb));
+                let limit_gb = st.quota.read().limit_bytes as f64 / (1024.0 * 1024.0 * 1024.0);
+                q_val.set_text(&format!("{} MB / {:.1} GB", used_mb, limit_gb));
 
                 if let Some(active) = ifaces.iter().find(|i| i.name == active_if) {
                     let ip_str = active.ipv4_addresses.join(", ");
@@ -311,6 +348,7 @@ fn create_dashboard_page(state: &AppState, rt: Arc<Runtime>) -> (GtkBox, Rc<dyn 
                     ));
                 }
             }
+            in_flight_clone.store(false, std::sync::atomic::Ordering::Release);
         });
     });
 
@@ -346,17 +384,30 @@ fn create_connections_page(
     let rt_clone = rt.clone();
     let list_clone = list_box.clone();
     let parent_clone = parent_window.clone();
+    let in_flight = Arc::new(std::sync::atomic::AtomicBool::new(false));
 
     let update_fn: Rc<dyn Fn()> = Rc::new(move || {
+        if in_flight
+            .compare_exchange(
+                false,
+                true,
+                std::sync::atomic::Ordering::AcqRel,
+                std::sync::atomic::Ordering::Relaxed,
+            )
+            .is_err()
+        {
+            return;
+        }
+
         let st = state_clone.clone();
-        let rt = rt_clone.clone();
         let list = list_clone.clone();
         let parent = parent_clone.clone();
+        let in_flight_clone = in_flight.clone();
 
         let (sender, receiver) = async_channel::bounded(1);
-        std::thread::spawn(move || {
-            let conns = rt.block_on(async { st.collector.poll_connections().await });
-            let _ = sender.send_blocking(conns);
+        rt_clone.spawn(async move {
+            let conns = st.collector.poll_connections().await;
+            let _ = sender.send(conns).await;
         });
 
         glib::spawn_future_local(async move {
@@ -473,6 +524,7 @@ fn create_connections_page(
                     list.append(&row);
                 }
             }
+            in_flight_clone.store(false, std::sync::atomic::Ordering::Release);
         });
     });
 
@@ -592,16 +644,29 @@ fn create_processes_page(state: &AppState, rt: Arc<Runtime>) -> (GtkBox, Rc<dyn 
     let state_clone = state.clone();
     let rt_clone = rt.clone();
     let list_clone = list_box.clone();
+    let in_flight = Arc::new(std::sync::atomic::AtomicBool::new(false));
 
     let update_fn: Rc<dyn Fn()> = Rc::new(move || {
+        if in_flight
+            .compare_exchange(
+                false,
+                true,
+                std::sync::atomic::Ordering::AcqRel,
+                std::sync::atomic::Ordering::Relaxed,
+            )
+            .is_err()
+        {
+            return;
+        }
+
         let st = state_clone.clone();
-        let rt = rt_clone.clone();
         let list = list_clone.clone();
+        let in_flight_clone = in_flight.clone();
 
         let (sender, receiver) = async_channel::bounded(1);
-        std::thread::spawn(move || {
-            let conns = rt.block_on(async { st.collector.poll_connections().await });
-            let _ = sender.send_blocking(conns);
+        rt_clone.spawn(async move {
+            let conns = st.collector.poll_connections().await;
+            let _ = sender.send(conns).await;
         });
 
         glib::spawn_future_local(async move {
@@ -673,6 +738,7 @@ fn create_processes_page(state: &AppState, rt: Arc<Runtime>) -> (GtkBox, Rc<dyn 
                     list.append(&row);
                 }
             }
+            in_flight_clone.store(false, std::sync::atomic::Ordering::Release);
         });
     });
 
@@ -1020,12 +1086,10 @@ fn create_investigation_page(rt: Arc<Runtime>) -> GtkBox {
         if q.is_empty() { return; }
 
         res_lbl_clone.set_text("Analyzing target...");
-        let rt = rt.clone();
         let (sender, receiver) = async_channel::bounded(1);
-
-        std::thread::spawn(move || {
-            let rep = rt.block_on(async { Investigator::investigate(&q).await });
-            let _ = sender.send_blocking(rep);
+        rt.spawn(async move {
+            let rep = Investigator::investigate(&q).await;
+            let _ = sender.send(rep).await;
         });
 
         let lbl = res_lbl_clone.clone();
@@ -1049,7 +1113,7 @@ fn create_investigation_page(rt: Arc<Runtime>) -> GtkBox {
     container
 }
 
-fn create_speedtest_page(rt: Arc<Runtime>) -> GtkBox {
+fn create_speedtest_page(state: &AppState, rt: Arc<Runtime>) -> GtkBox {
     let container = GtkBox::new(Orientation::Vertical, 16);
     container.add_css_class("view-container");
 
@@ -1073,24 +1137,25 @@ fn create_speedtest_page(rt: Arc<Runtime>) -> GtkBox {
 
     let res_clone = results_lbl.clone();
     let btn_clone = start_btn.clone();
+    let st_for_bench = state.clone();
     start_btn.connect_clicked(move |_| {
         res_clone.set_text("Benchmarking network throughput (latency, jitter, 5MB download, 1MB upload)...");
         btn_clone.set_sensitive(false);
-        let rt = rt.clone();
         let (sender, receiver) = async_channel::bounded(1);
-
-        std::thread::spawn(move || {
-            let r = rt.block_on(async { SpeedTestEngine::run_benchmark().await });
-            let _ = sender.send_blocking(r);
+        rt.spawn(async move {
+            let r = SpeedTestEngine::run_benchmark().await;
+            let _ = sender.send(r).await;
         });
 
         let lbl = res_clone.clone();
         let btn = btn_clone.clone();
+        let st = st_for_bench.clone();
         glib::spawn_future_local(async move {
             if let Ok(res) = receiver.recv().await {
                 btn.set_sensitive(true);
                 match res {
                     Ok(bench) => {
+                        *st.latest_speedtest.write() = Some(bench.clone());
                         lbl.set_text(&format!(
                             "Benchmark Complete!\nServer: {}\nLatency: {:.2} ms | Jitter: {:.2} ms\nDownload: {:.2} Mbps\nUpload: {:.2} Mbps\nCompleted at: {} UTC",
                             bench.server, bench.latency_ms, bench.jitter_ms, bench.download_mbps, bench.upload_mbps, bench.timestamp.format("%H:%M:%S")
@@ -1144,9 +1209,23 @@ fn create_wifi_page(state: &AppState, rt: Arc<Runtime>) -> (GtkBox, Rc<dyn Fn()>
 
     let st_clone = state.clone();
     let rt_clone = rt.clone();
+    let in_flight = Arc::new(std::sync::atomic::AtomicBool::new(false));
+
     let update_fn: Rc<dyn Fn()> = Rc::new(move || {
+        if in_flight
+            .compare_exchange(
+                false,
+                true,
+                std::sync::atomic::Ordering::AcqRel,
+                std::sync::atomic::Ordering::Relaxed,
+            )
+            .is_err()
+        {
+            return;
+        }
+
         let st = st_clone.clone();
-        let rt = rt_clone.clone();
+        let in_flight_clone = in_flight.clone();
         let s_lbl = ssid_lbl.clone();
         let b_lbl = bssid_lbl.clone();
         let sig_lbl = signal_lbl.clone();
@@ -1154,9 +1233,9 @@ fn create_wifi_page(state: &AppState, rt: Arc<Runtime>) -> (GtkBox, Rc<dyn Fn()>
         let f_lbl = freq_lbl.clone();
 
         let (sender, receiver) = async_channel::bounded(1);
-        std::thread::spawn(move || {
-            let ifaces = rt.block_on(async { st.collector.poll_interfaces().await });
-            let _ = sender.send_blocking(ifaces);
+        rt_clone.spawn(async move {
+            let ifaces = st.collector.poll_interfaces().await;
+            let _ = sender.send(ifaces).await;
         });
 
         glib::spawn_future_local(async move {
@@ -1201,6 +1280,7 @@ fn create_wifi_page(state: &AppState, rt: Arc<Runtime>) -> (GtkBox, Rc<dyn Fn()>
                     s_lbl.set_text("No active Wi-Fi interface detected on this machine");
                 }
             }
+            in_flight_clone.store(false, std::sync::atomic::Ordering::Release);
         });
     });
 
@@ -1254,22 +1334,19 @@ fn create_dns_page(rt: Arc<Runtime>) -> (GtkBox, Rc<dyn Fn()>) {
         }
 
         res_text_clone.set_text("Resolving...");
-        let rt = rt_clone.clone();
         let (sender, receiver) =
             async_channel::bounded::<Result<netscope_core::DnsRecord, String>>(1);
 
-        std::thread::spawn(move || {
-            let res = rt.block_on(async {
-                if let Ok(inspector) = DnsInspector::new() {
-                    inspector
-                        .resolve(&domain, "A")
-                        .await
-                        .map_err(|e| e.to_string())
-                } else {
-                    Err("Failed to initialize resolver".to_string())
-                }
-            });
-            let _ = sender.send_blocking(res);
+        rt_clone.spawn(async move {
+            let res = if let Ok(inspector) = DnsInspector::new() {
+                inspector
+                    .resolve(&domain, "A")
+                    .await
+                    .map_err(|e| e.to_string())
+            } else {
+                Err("Failed to initialize resolver".to_string())
+            };
+            let _ = sender.send(res).await;
         });
 
         let lbl = res_text_clone.clone();
@@ -1328,12 +1405,18 @@ fn create_diagnostics_page(rt: Arc<Runtime>) -> GtkBox {
     container.append(&result_box);
 
     let lbl_ping = res_lbl.clone();
+    let rt_ping = rt.clone();
     ping_btn.connect_clicked(move |_| {
         lbl_ping.set_text("Pinging 1.1.1.1 (4 packets)...");
         let (sender, receiver) = async_channel::bounded(1);
-        std::thread::spawn(move || {
-            let res = DiagnosticsEngine::ping_host("1.1.1.1", 4).map_err(|e| e.to_string());
-            let _ = sender.send_blocking(res);
+        rt_ping.spawn(async move {
+            let res = tokio::task::spawn_blocking(|| {
+                DiagnosticsEngine::ping_host("1.1.1.1", 4).map_err(|e| e.to_string())
+            })
+            .await
+            .map_err(|e| e.to_string())
+            .and_then(|r| r);
+            let _ = sender.send(res).await;
         });
 
         let l = lbl_ping.clone();
@@ -1361,18 +1444,15 @@ fn create_diagnostics_page(rt: Arc<Runtime>) -> GtkBox {
     let rt_clone = rt.clone();
     tcp_btn.connect_clicked(move |_| {
         lbl_tcp.set_text("Connecting to google.com:443 via TCP...");
-        let rt = rt_clone.clone();
         let (sender, receiver) = async_channel::bounded(1);
-        std::thread::spawn(move || {
-            let res = rt.block_on(async {
-                DiagnosticsEngine::test_tcp_port(
-                    "google.com",
-                    443,
-                    std::time::Duration::from_secs(3),
-                )
-                .await
-            });
-            let _ = sender.send_blocking(res);
+        rt_clone.spawn(async move {
+            let res = DiagnosticsEngine::test_tcp_port(
+                "google.com",
+                443,
+                std::time::Duration::from_secs(3),
+            )
+            .await;
+            let _ = sender.send(res).await;
         });
 
         let l = lbl_tcp.clone();
@@ -1452,23 +1532,39 @@ fn create_security_page(state: &AppState, rt: Arc<Runtime>) -> (GtkBox, Rc<dyn F
     let rt_clone = rt.clone();
     let list_clone = list_box.clone();
     let status_lbl_clone = status_lbl.clone();
+    let in_flight = Arc::new(std::sync::atomic::AtomicBool::new(false));
 
     let update_fn: Rc<dyn Fn()> = Rc::new(move || {
+        if in_flight
+            .compare_exchange(
+                false,
+                true,
+                std::sync::atomic::Ordering::AcqRel,
+                std::sync::atomic::Ordering::Relaxed,
+            )
+            .is_err()
+        {
+            return;
+        }
+
         let st = st_clone.clone();
-        let rt = rt_clone.clone();
         let list = list_clone.clone();
         let stat_lbl = status_lbl_clone.clone();
+        let in_flight_clone = in_flight.clone();
 
         let (sender, receiver) = async_channel::bounded(1);
-        std::thread::spawn(move || {
-            let conns = rt.block_on(async { st.collector.poll_connections().await });
-            let mut engine = st.rule_engine.write();
-            let alerts = engine.evaluate_connections(&conns);
-            for a in &alerts {
-                let _ = st.storage.insert_alert(a);
-            }
-            let total_indicators = engine.threat_intel().len();
-            let _ = sender.send_blocking((alerts, total_indicators));
+        rt_clone.spawn(async move {
+            let conns = st.collector.poll_connections().await;
+            let (alerts, total_indicators) = {
+                let mut engine = st.rule_engine.write();
+                let alerts = engine.evaluate_connections(&conns);
+                for a in &alerts {
+                    let _ = st.storage.insert_alert(a);
+                }
+                let total = engine.threat_intel().len();
+                (alerts, total)
+            };
+            let _ = sender.send((alerts, total_indicators)).await;
         });
 
         glib::spawn_future_local(async move {
@@ -1535,6 +1631,7 @@ fn create_security_page(state: &AppState, rt: Arc<Runtime>) -> (GtkBox, Rc<dyn F
                     list.append(&row);
                 }
             }
+            in_flight_clone.store(false, std::sync::atomic::Ordering::Release);
         });
     });
 
@@ -1556,19 +1653,17 @@ fn create_security_page(state: &AppState, rt: Arc<Runtime>) -> (GtkBox, Rc<dyn F
         let u = u_feed.clone();
 
         let (sender, receiver) = async_channel::bounded(1);
-        std::thread::spawn(move || {
-            let res = rt.block_on(async {
-                let mut pipeline = netscope_security::ThreatPipeline::new();
-                let mut total_added = 0;
-                for provider in ["feodo", "urlhaus", "tor_exits"] {
-                    if let Ok(indicators) = pipeline.fetch_feed_updates(provider).await {
-                        let added = st.rule_engine.write().ingest_indicators(indicators);
+        rt.spawn(async move {
+            let mut pipeline = netscope_security::ThreatPipeline::new();
+            let mut total_added = 0;
+            for provider in ["feodo", "urlhaus", "tor_exits"] {
+                if let Ok(indicators) = pipeline.fetch_feed_updates(provider).await {
+                    if let Ok(added) = st.rule_engine.write().ingest_indicators(indicators) {
                         total_added += added;
                     }
                 }
-                total_added
-            });
-            let _ = sender.send_blocking(res);
+            }
+            let _ = sender.send(total_added).await;
         });
 
         glib::spawn_future_local(async move {
@@ -1597,8 +1692,13 @@ fn create_settings_page(state: &AppState) -> GtkBox {
     let card = GtkBox::new(Orientation::Vertical, 12);
     card.add_css_class("card");
 
+    let profile_name = state.active_profile.read().name.clone();
+    let quota_limit_gb = state.quota.read().limit_bytes as f64 / (1024.0 * 1024.0 * 1024.0);
     let row_quota = GtkBox::new(Orientation::Horizontal, 12);
-    let lbl_quota = Label::new(Some("Active Daily Allowance Limit (5.0 GB)"));
+    let lbl_quota = Label::new(Some(&format!(
+        "Active Daily Allowance Limit ({:.1} GB) — Profile: {}",
+        quota_limit_gb, profile_name
+    )));
     lbl_quota.set_hexpand(true);
     lbl_quota.set_halign(gtk4::Align::Start);
     let sw_quota = gtk4::Switch::new();
@@ -1627,11 +1727,23 @@ fn create_settings_page(state: &AppState) -> GtkBox {
     let export_btn = Button::with_label("Export Full Forensic HTML Report");
     export_btn.add_css_class("suggested-action");
     let st_for_export = state.clone();
-    export_btn.connect_clicked(move |_| {
-        if let Ok(html) = st_for_export.storage.export_html_report() {
-            let _ = std::fs::write("/tmp/netscope-report.html", html);
-        }
-    });
+    export_btn.connect_clicked(
+        move |btn| match st_for_export.storage.export_html_report() {
+            Ok(html) => {
+                if let Err(e) = std::fs::write("/tmp/netscope-report.html", html) {
+                    tracing::warn!(
+                        "Failed to write forensic report to /tmp/netscope-report.html: {}",
+                        e
+                    );
+                } else {
+                    btn.set_label("Report Exported to /tmp/netscope-report.html");
+                }
+            }
+            Err(e) => {
+                tracing::warn!("Failed to generate HTML export report: {}", e);
+            }
+        },
+    );
 
     card.append(&row_quota);
     card.append(&row1);

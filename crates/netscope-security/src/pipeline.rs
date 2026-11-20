@@ -3,6 +3,8 @@ use serde::{Deserialize, Serialize};
 use std::net::IpAddr;
 use std::str::FromStr;
 
+const MAX_FEED_SIZE_BYTES: usize = 5 * 1024 * 1024; // 5 MB bounded streaming limit
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ThreatIndicator {
     pub indicator: String,
@@ -85,7 +87,7 @@ impl ThreatPipeline {
             .build()
             .map_err(|e| format!("HTTP client error: {}", e))?;
 
-        let resp = client
+        let mut resp = client
             .get(&provider.url)
             .send()
             .await
@@ -95,17 +97,48 @@ impl ThreatPipeline {
             return Err(format!("Feed server returned HTTP {}", resp.status()));
         }
 
-        // Bounded response size: max 5 MB to prevent memory exhaustion
-        let content_length = resp.content_length().unwrap_or(0);
-        if content_length > 5 * 1024 * 1024 {
-            return Err("Feed response exceeded maximum allowed size (5MB)".to_string());
+        // Bounded response streaming: enforces 5 MB limit even if Content-Length header is omitted
+        let mut body_bytes = Vec::new();
+        while let Some(chunk) = resp
+            .chunk()
+            .await
+            .map_err(|e| format!("Stream error reading feed: {}", e))?
+        {
+            if body_bytes.len() + chunk.len() > MAX_FEED_SIZE_BYTES {
+                return Err(format!(
+                    "Feed response exceeded maximum allowed size of 5MB (received {} bytes)",
+                    body_bytes.len() + chunk.len()
+                ));
+            }
+            body_bytes.extend_from_slice(&chunk);
         }
 
-        let body = resp
-            .text()
-            .await
-            .map_err(|e| format!("Failed to read body: {}", e))?;
+        let body = String::from_utf8(body_bytes)
+            .map_err(|e| format!("Feed response is not valid UTF-8: {}", e))?;
         let now = Utc::now();
+
+        let indicators = Self::parse_feed_body(provider_id, &provider.name, &body, now)?;
+
+        if indicators.is_empty() {
+            return Err(format!(
+                "Feed '{}' returned zero valid threat indicators",
+                provider_id
+            ));
+        }
+
+        // Only update metadata on verified successful parse
+        provider.last_updated = Some(now);
+        provider.total_indicators = indicators.len();
+        Ok(indicators)
+    }
+
+    /// Synchronous and deterministic parser for supported threat feed formats
+    pub fn parse_feed_body(
+        provider_id: &str,
+        provider_name: &str,
+        body: &str,
+        now: DateTime<Utc>,
+    ) -> Result<Vec<ThreatIndicator>, String> {
         let mut indicators = Vec::new();
 
         match provider_id {
@@ -124,8 +157,8 @@ impl ThreatPipeline {
                                 "IPv6".to_string()
                             },
                             category: "Tor Anonymization Relay".to_string(),
-                            source: provider.name.clone(),
-                            confidence: 85, // Transparent separate classification, not 95+ malware
+                            source: provider_name.to_string(),
+                            confidence: 85,
                             first_seen: now,
                             last_seen: now,
                             expires_at: Some(now + chrono::Duration::days(14)),
@@ -134,59 +167,80 @@ impl ThreatPipeline {
                 }
             }
             "feodo" => {
-                // Feodo Tracker JSON format: array of objects with "ip_address", "malware", etc.
-                if let Ok(val) = serde_json::from_str::<serde_json::Value>(&body) {
-                    if let Some(arr) = val.as_array() {
-                        for item in arr {
-                            if let Some(ip_str) = item.get("ip_address").and_then(|v| v.as_str()) {
-                                if let Ok(ip) = IpAddr::from_str(ip_str) {
-                                    let malware = item
-                                        .get("malware")
-                                        .and_then(|v| v.as_str())
-                                        .unwrap_or("Botnet C2");
-                                    indicators.push(ThreatIndicator {
-                                        indicator: ip.to_string(),
-                                        indicator_type: if ip.is_ipv4() {
-                                            "IPv4".to_string()
-                                        } else {
-                                            "IPv6".to_string()
-                                        },
-                                        category: format!("Malware C2 ({})", malware),
-                                        source: provider.name.clone(),
-                                        confidence: 95,
-                                        first_seen: now,
-                                        last_seen: now,
-                                        expires_at: Some(now + chrono::Duration::days(30)),
-                                    });
-                                }
-                            }
+                let val: serde_json::Value = serde_json::from_str(body)
+                    .map_err(|e| format!("Feodo Tracker feed invalid JSON: {}", e))?;
+
+                let arr = val.as_array().ok_or_else(|| {
+                    "Feodo Tracker JSON response root must be an array".to_string()
+                })?;
+
+                for item in arr {
+                    if let Some(ip_str) = item.get("ip_address").and_then(|v| v.as_str()) {
+                        if let Ok(ip) = IpAddr::from_str(ip_str.trim()) {
+                            let malware = item
+                                .get("malware")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("Botnet C2");
+                            indicators.push(ThreatIndicator {
+                                indicator: ip.to_string(),
+                                indicator_type: if ip.is_ipv4() {
+                                    "IPv4".to_string()
+                                } else {
+                                    "IPv6".to_string()
+                                },
+                                category: format!("Malware C2 ({})", malware),
+                                source: provider_name.to_string(),
+                                confidence: 95,
+                                first_seen: now,
+                                last_seen: now,
+                                expires_at: Some(now + chrono::Duration::days(30)),
+                            });
                         }
                     }
                 }
             }
             "urlhaus" => {
-                // URLhaus recent payload JSON
-                if let Ok(val) = serde_json::from_str::<serde_json::Value>(&body) {
-                    if let Some(urls) = val.get("urls").and_then(|v| v.as_array()) {
-                        for item in urls {
-                            if let Some(host) = item.get("host").and_then(|v| v.as_str()) {
-                                if let Ok(ip) = IpAddr::from_str(host) {
-                                    indicators.push(ThreatIndicator {
-                                        indicator: ip.to_string(),
-                                        indicator_type: if ip.is_ipv4() {
-                                            "IPv4".to_string()
-                                        } else {
-                                            "IPv6".to_string()
-                                        },
-                                        category: "Malicious Payload Host".to_string(),
-                                        source: provider.name.clone(),
-                                        confidence: 90,
-                                        first_seen: now,
-                                        last_seen: now,
-                                        expires_at: Some(now + chrono::Duration::days(14)),
-                                    });
-                                }
-                            }
+                let val: serde_json::Value = serde_json::from_str(body)
+                    .map_err(|e| format!("URLhaus feed invalid JSON: {}", e))?;
+
+                let urls = val
+                    .get("urls")
+                    .and_then(|v| v.as_array())
+                    .ok_or_else(|| "URLhaus response missing 'urls' array schema".to_string())?;
+
+                for item in urls {
+                    if let Some(host) = item.get("host").and_then(|v| v.as_str()) {
+                        let host_trimmed = host.trim();
+                        if host_trimmed.is_empty() {
+                            continue;
+                        }
+                        if let Ok(ip) = IpAddr::from_str(host_trimmed) {
+                            indicators.push(ThreatIndicator {
+                                indicator: ip.to_string(),
+                                indicator_type: if ip.is_ipv4() {
+                                    "IPv4".to_string()
+                                } else {
+                                    "IPv6".to_string()
+                                },
+                                category: "Malicious Payload Host".to_string(),
+                                source: provider_name.to_string(),
+                                confidence: 90,
+                                first_seen: now,
+                                last_seen: now,
+                                expires_at: Some(now + chrono::Duration::days(14)),
+                            });
+                        } else if host_trimmed.contains('.') && !host_trimmed.contains(' ') {
+                            // Valid domain indicator preserved accurately
+                            indicators.push(ThreatIndicator {
+                                indicator: host_trimmed.to_lowercase(),
+                                indicator_type: "Domain".to_string(),
+                                category: "Malicious Payload Distribution Domain".to_string(),
+                                source: provider_name.to_string(),
+                                confidence: 90,
+                                first_seen: now,
+                                last_seen: now,
+                                expires_at: Some(now + chrono::Duration::days(14)),
+                            });
                         }
                     }
                 }
@@ -199,8 +253,6 @@ impl ThreatPipeline {
             }
         }
 
-        provider.last_updated = Some(now);
-        provider.total_indicators = indicators.len();
         Ok(indicators)
     }
 }
@@ -225,15 +277,14 @@ mod tests {
 invalid-ip
 2001:db8::1
 ";
-        let mut count = 0;
-        for line in fixture.lines() {
-            let trimmed = line.trim();
-            if !trimmed.is_empty() && !trimmed.starts_with('#') && IpAddr::from_str(trimmed).is_ok()
-            {
-                count += 1;
-            }
-        }
-        assert_eq!(count, 3);
+        let now = Utc::now();
+        let indicators =
+            ThreatPipeline::parse_feed_body("tor_exits", "Tor Project", fixture, now).unwrap();
+        assert_eq!(indicators.len(), 3);
+        assert_eq!(indicators[0].indicator, "185.220.101.5");
+        assert_eq!(indicators[0].indicator_type, "IPv4");
+        assert_eq!(indicators[2].indicator, "2001:db8::1");
+        assert_eq!(indicators[2].indicator_type, "IPv6");
     }
 
     #[test]
@@ -243,12 +294,39 @@ invalid-ip
             {"ip_address": "45.154.255.88", "malware": "QakBot", "status": "offline"}
         ]"#;
 
-        let val: serde_json::Value = serde_json::from_str(json).unwrap();
-        let arr = val.as_array().unwrap();
-        assert_eq!(arr.len(), 2);
-        assert_eq!(
-            arr[0].get("ip_address").unwrap().as_str().unwrap(),
-            "194.26.29.114"
-        );
+        let now = Utc::now();
+        let indicators =
+            ThreatPipeline::parse_feed_body("feodo", "Feodo Tracker", json, now).unwrap();
+        assert_eq!(indicators.len(), 2);
+        assert_eq!(indicators[0].indicator, "194.26.29.114");
+        assert_eq!(indicators[0].category, "Malware C2 (Emotet)");
+    }
+
+    #[test]
+    fn test_parse_urlhaus_json_with_both_ips_and_domains() {
+        let json = r#"{
+            "query_status": "ok",
+            "urls": [
+                {"host": "198.51.100.22", "threat": "malware_download"},
+                {"host": "evil-c2-payload.example.com", "threat": "malware_download"},
+                {"host": "", "threat": "empty"}
+            ]
+        }"#;
+
+        let now = Utc::now();
+        let indicators = ThreatPipeline::parse_feed_body("urlhaus", "URLhaus", json, now).unwrap();
+        assert_eq!(indicators.len(), 2);
+        assert_eq!(indicators[0].indicator, "198.51.100.22");
+        assert_eq!(indicators[0].indicator_type, "IPv4");
+        assert_eq!(indicators[1].indicator, "evil-c2-payload.example.com");
+        assert_eq!(indicators[1].indicator_type, "Domain");
+    }
+
+    #[test]
+    fn test_invalid_json_returns_real_error() {
+        let invalid = "<html><title>500 Internal Server Error</title></html>";
+        let now = Utc::now();
+        assert!(ThreatPipeline::parse_feed_body("feodo", "Feodo", invalid, now).is_err());
+        assert!(ThreatPipeline::parse_feed_body("urlhaus", "URLhaus", invalid, now).is_err());
     }
 }

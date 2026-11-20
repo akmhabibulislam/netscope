@@ -1610,6 +1610,7 @@ dependencies = [
  "netscope-core",
  "rusqlite",
  "serde",
+ "tempfile",
  "tracing",
 ]
 

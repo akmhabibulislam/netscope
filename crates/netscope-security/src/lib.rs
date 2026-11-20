@@ -64,11 +64,38 @@ impl SecurityRuleEngine {
 
             // Rule 0: Offline Threat Intelligence (IoC match)
             if let Some(matched) = self.threat_intel.check_ip(conn.remote_addr) {
+                let is_tor = matched.threat_type.contains("Tor")
+                    || matched.threat_type.contains("Anonymization");
+                let severity = if is_tor {
+                    AlertSeverity::Medium
+                } else {
+                    AlertSeverity::Critical
+                };
+
+                let title = if is_tor {
+                    format!("Anonymizer / Privacy Relay: {}", matched.threat_type)
+                } else {
+                    format!("Known Threat Detected: {}", matched.threat_type)
+                };
+
+                let recs = if is_tor {
+                    vec![
+                        "Investigate if connection to privacy relay was intentional".to_string(),
+                        "Verify application proxy or VPN configuration".to_string(),
+                    ]
+                } else {
+                    vec![
+                        "Terminate connection immediately using NetScope Firewall".to_string(),
+                        "Quarantine affected binary".to_string(),
+                        "Scan host filesystem".to_string(),
+                    ]
+                };
+
                 alerts.push(SecurityAlert {
                     id: format!("ALERT-THREAT-{}", conn.id),
                     timestamp: now,
-                    severity: AlertSeverity::Critical,
-                    title: format!("Known Threat Detected: {}", matched.threat_type),
+                    severity,
+                    title,
                     message: format!(
                         "Process '{}' connected to {}: {}. (Source: {})",
                         proc_name, matched.ip, matched.description, matched.source
@@ -77,11 +104,7 @@ impl SecurityRuleEngine {
                     affected_process: Some(proc_name.clone()),
                     remote_ip: Some(conn.remote_addr),
                     remote_port: Some(conn.remote_port),
-                    recommendations: vec![
-                        "Terminate connection immediately using NetScope Firewall".to_string(),
-                        "Quarantine affected binary".to_string(),
-                        "Scan host filesystem".to_string(),
-                    ],
+                    recommendations: recs,
                     reviewed: false,
                 });
             }
@@ -231,7 +254,7 @@ impl SecurityRuleEngine {
         &mut self.threat_intel
     }
 
-    pub fn ingest_indicators(&mut self, indicators: Vec<ThreatIndicator>) -> usize {
+    pub fn ingest_indicators(&mut self, indicators: Vec<ThreatIndicator>) -> Result<usize, String> {
         let mut count = 0;
         for ind in indicators {
             if let Ok(ip) = std::str::FromStr::from_str(&ind.indicator) {
@@ -247,7 +270,7 @@ impl SecurityRuleEngine {
                 count += 1;
             }
         }
-        let _ = self.threat_intel.save_to_disk();
-        count
+        self.threat_intel.save_to_disk()?;
+        Ok(count)
     }
 }

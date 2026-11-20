@@ -41,15 +41,17 @@ impl SpeedTestEngine {
 
         let latency_ms = latencies.iter().sum::<f64>() / latencies.len().max(1) as f64;
         let jitter_ms = if latencies.len() > 1 {
-            (latencies
+            let max_val = latencies
                 .iter()
-                .max_by(|a, b| a.partial_cmp(b).unwrap())
-                .unwrap()
-                - latencies
-                    .iter()
-                    .min_by(|a, b| a.partial_cmp(b).unwrap())
-                    .unwrap())
-            .abs()
+                .max_by(|a, b| a.total_cmp(b))
+                .copied()
+                .unwrap_or(0.0);
+            let min_val = latencies
+                .iter()
+                .min_by(|a, b| a.total_cmp(b))
+                .copied()
+                .unwrap_or(0.0);
+            (max_val - min_val).abs()
         } else {
             1.2
         };
