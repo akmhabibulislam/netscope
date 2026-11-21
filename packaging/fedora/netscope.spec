@@ -65,8 +65,8 @@ desktop-file-validate %{buildroot}%{_datadir}/applications/netscope.desktop
 /usr/bin/update-desktop-database &> /dev/null || :
 /bin/touch --no-create %{_datadir}/icons/hicolor &>/dev/null || :
 /usr/bin/gtk4-update-icon-cache %{_datadir}/icons/hicolor &>/dev/null || :
-# Grant packet capture capabilities to netscope-cli without requiring root
-/usr/sbin/setcap cap_net_raw,cap_net_admin=eip %{_bindir}/netscope-cli 2>/dev/null || :
+# Grant packet capture capability to netscope-cli without requiring root
+/usr/sbin/setcap cap_net_raw=ep %{_bindir}/netscope-cli 2>/dev/null || :
 
 %postun
 /usr/bin/update-desktop-database &> /dev/null || :

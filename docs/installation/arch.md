@@ -62,8 +62,9 @@ makepkg -si
 
 To capture raw packets without running as `root`:
 ```bash
-sudo setcap cap_net_raw,cap_net_admin=eip /usr/bin/netscope-cli
+sudo setcap cap_net_raw=ep /usr/local/bin/netscope-cli
 ```
+*Note: Administrative firewall commands require explicit privilege elevation via `sudo netscope-cli firewall ...`.*
 
 ---
 

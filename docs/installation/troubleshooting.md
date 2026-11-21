@@ -18,8 +18,9 @@ Linux requires `CAP_NET_RAW` to open raw packet capture sockets.
 ### Resolution
 Apply file capabilities to the binary:
 ```bash
-sudo setcap cap_net_raw,cap_net_admin=eip $(which netscope-cli)
+sudo setcap cap_net_raw=ep $(which netscope-cli)
 ```
+*(Firewall administration commands require explicit root execution via `sudo netscope-cli firewall ...`)*
 
 ---
 

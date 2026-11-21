@@ -60,16 +60,16 @@
 NetScope supports native distribution packaging for **Fedora Workstation** and **Arch Linux / CachyOS**, automated installation scripts, and clean source compilation.
 
 See detailed installation guides:
-- 🔵 [Fedora Linux Installation Guide (RPM & DNF)](file:///home/kairox/Projects/personal/cyber_security/recon/net/docs/installation/fedora.md)
-- 🏹 [Arch Linux & CachyOS Installation Guide (PKGBUILD & Pacman)](file:///home/kairox/Projects/personal/cyber_security/recon/net/docs/installation/arch.md)
-- 🔐 [Permissions & Security Architecture](file:///home/kairox/Projects/personal/cyber_security/recon/net/docs/installation/permissions.md)
-- 🛠️ [Troubleshooting Guide](file:///home/kairox/Projects/personal/cyber_security/recon/net/docs/installation/troubleshooting.md)
+- 🔵 [Fedora Linux Installation Guide (RPM & DNF)](docs/installation/fedora.md)
+- 🏹 [Arch Linux & CachyOS Installation Guide (PKGBUILD & Pacman)](docs/installation/arch.md)
+- 🔐 [Permissions & Security Architecture](docs/installation/permissions.md)
+- 🛠️ [Troubleshooting Guide](docs/installation/troubleshooting.md)
 
 ---
 
 ### 🔵 Method 1: Fedora Linux Native RPM (`dnf`)
 
-NetScope provides native Fedora Workstation RPM packaging (Fedora 39, 40, 41):
+NetScope provides native Fedora Workstation RPM packaging (Fedora 40, 41):
 
 ```bash
 # Clone the repository

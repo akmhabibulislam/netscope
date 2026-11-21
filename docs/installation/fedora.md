@@ -119,7 +119,7 @@ NetScope requires privileges only for specific low-level kernel operations:
 1. **Hardware Raw Packet Sniffer (`AF_PACKET`)**:
    Requires `CAP_NET_RAW` Linux capability. The RPM package automatically sets this capability on `/usr/bin/netscope-cli` during installation:
    ```bash
-   sudo setcap cap_net_raw,cap_net_admin=eip /usr/bin/netscope-cli
+   sudo setcap cap_net_raw=ep /usr/bin/netscope-cli
    ```
    This allows ordinary users to capture packets without needing `sudo`.
 

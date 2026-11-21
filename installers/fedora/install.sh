@@ -159,7 +159,7 @@ if command -v getcap &>/dev/null; then
         log_ok "Network capabilities configured: ${CAPS}"
     else
         log_warn "Linux capabilities not set on ${CLI_PATH}. Run without root:"
-        echo "  sudo setcap cap_net_raw,cap_net_admin=eip ${CLI_PATH}"
+        echo "  sudo setcap cap_net_raw=ep ${CLI_PATH}"
     fi
 fi
 

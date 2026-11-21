@@ -34,13 +34,15 @@ Running complex graphical user interfaces (GTK4, WebKit, Wayland/X11 clients) as
 To allow ordinary desktop users to capture live raw packets with the sniffer without granting root access, Linux File Capabilities are used:
 
 ```bash
-# Grant packet sniffing and socket administration capabilities
-sudo setcap cap_net_raw,cap_net_admin=eip $(which netscope-cli)
+# Grant packet sniffing capability (CAP_NET_RAW) without granting firewall admin
+sudo setcap cap_net_raw=ep $(which netscope-cli)
 
 # Verify capability assignment:
 getcap $(which netscope-cli)
-# Output: /usr/bin/netscope-cli cap_net_admin,cap_net_raw=eip
+# Output: /usr/bin/netscope-cli cap_net_raw=ep
 ```
+
+> **Least-Privilege Notice**: NetScope strictly separates packet analysis from network administration. Packet capture requires only `CAP_NET_RAW`. Administrative operations (such as firewall manipulation and socket teardown) are not granted via ambient binary capabilities; they require explicit invocation through `sudo netscope-cli firewall ...`.
 
 ---
 

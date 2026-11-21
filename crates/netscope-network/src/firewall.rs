@@ -85,9 +85,11 @@ pub struct NetworkFirewall;
 type FirewallStep<'a> = (&'a str, &'a [&'a str], Option<&'a [&'a str]>);
 
 impl NetworkFirewall {
-    const CHAIN_IN: &'static str = "NETSCOPE_IN";
-    const CHAIN_OUT: &'static str = "NETSCOPE_OUT";
-    const CHAIN_BLOCK: &'static str = "NETSCOPE_BLOCK";
+    pub const CHAIN_IN: &'static str = "NETSCOPE_IN";
+    pub const CHAIN_OUT: &'static str = "NETSCOPE_OUT";
+    pub const CHAIN_BLOCK: &'static str = "NETSCOPE_BLOCK";
+    pub const TABLE_KILLSWITCH: &'static str = "netscope_killswitch";
+    pub const TABLE_BLOCK: &'static str = "netscope_block";
 
     /// Detect active Linux firewall backend without mixing commands
     pub fn detect_backend() -> FirewallBackend {
@@ -201,13 +203,13 @@ impl NetworkFirewall {
         };
 
         // 1. Ensure table inet netscope_block exists
-        let _ = runner.execute("nft", &["add", "table", "inet", "netscope_block"]);
+        let _ = runner.execute("nft", &["add", "table", "inet", Self::TABLE_BLOCK]);
 
         // 2. Ensure set exists
         let set_def = format!("{{ type {}; }}", set_type);
         let _ = runner.execute(
             "nft",
-            &["add", "set", "inet", "netscope_block", set_name, &set_def],
+            &["add", "set", "inet", Self::TABLE_BLOCK, set_name, &set_def],
         );
 
         // 3. Ensure output chain exists
@@ -217,7 +219,7 @@ impl NetworkFirewall {
                 "add",
                 "chain",
                 "inet",
-                "netscope_block",
+                Self::TABLE_BLOCK,
                 "output",
                 "{ type filter hook output priority -5; policy accept; }",
             ],
@@ -230,7 +232,14 @@ impl NetworkFirewall {
         };
         let _ = runner.execute(
             "nft",
-            &["add", "rule", "inet", "netscope_block", "output", drop_rule],
+            &[
+                "add",
+                "rule",
+                "inet",
+                Self::TABLE_BLOCK,
+                "output",
+                drop_rule,
+            ],
         );
 
         // 5. Check if element already exists
@@ -241,7 +250,7 @@ impl NetworkFirewall {
                 "get",
                 "element",
                 "inet",
-                "netscope_block",
+                Self::TABLE_BLOCK,
                 set_name,
                 &elem_str,
             ],
@@ -262,7 +271,7 @@ impl NetworkFirewall {
                 "add",
                 "element",
                 "inet",
-                "netscope_block",
+                Self::TABLE_BLOCK,
                 set_name,
                 &elem_str,
             ],
@@ -384,7 +393,7 @@ impl NetworkFirewall {
                 "delete",
                 "element",
                 "inet",
-                "netscope_block",
+                Self::TABLE_BLOCK,
                 set_name,
                 &elem_str,
             ],
@@ -609,14 +618,14 @@ impl NetworkFirewall {
         }
 
         let commands: [(&str, &[&str]); 5] = [
-            ("nft", &["add", "table", "inet", "netscope"]),
+            ("nft", &["add", "table", "inet", Self::TABLE_KILLSWITCH]),
             (
                 "nft",
                 &[
                     "add",
                     "chain",
                     "inet",
-                    "netscope",
+                    Self::TABLE_KILLSWITCH,
                     "input",
                     "{ type filter hook input priority -10; policy accept; }",
                 ],
@@ -627,7 +636,7 @@ impl NetworkFirewall {
                     "add",
                     "chain",
                     "inet",
-                    "netscope",
+                    Self::TABLE_KILLSWITCH,
                     "output",
                     "{ type filter hook output priority -10; policy accept; }",
                 ],
@@ -635,13 +644,29 @@ impl NetworkFirewall {
             (
                 "nft",
                 &[
-                    "add", "rule", "inet", "netscope", "input", "iif", "!=", "lo", "drop",
+                    "add",
+                    "rule",
+                    "inet",
+                    Self::TABLE_KILLSWITCH,
+                    "input",
+                    "iif",
+                    "!=",
+                    "lo",
+                    "drop",
                 ],
             ),
             (
                 "nft",
                 &[
-                    "add", "rule", "inet", "netscope", "output", "oif", "!=", "lo", "drop",
+                    "add",
+                    "rule",
+                    "inet",
+                    Self::TABLE_KILLSWITCH,
+                    "output",
+                    "oif",
+                    "!=",
+                    "lo",
+                    "drop",
                 ],
             ),
         ];
@@ -659,7 +684,8 @@ impl NetworkFirewall {
                         applied_count,
                         out.stderr.trim()
                     );
-                    let _ = runner.execute("nft", &["delete", "table", "inet", "netscope"]);
+                    let _ =
+                        runner.execute("nft", &["delete", "table", "inet", Self::TABLE_KILLSWITCH]);
                     return Err(format!(
                         "nftables activation failed: {}. Table transactionally removed.",
                         out.stderr.trim()
@@ -667,7 +693,8 @@ impl NetworkFirewall {
                 }
                 Err(e) => {
                     warn!("nftables invocation error: {}", e);
-                    let _ = runner.execute("nft", &["delete", "table", "inet", "netscope"]);
+                    let _ =
+                        runner.execute("nft", &["delete", "table", "inet", Self::TABLE_KILLSWITCH]);
                     return Err(format!(
                         "nftables invocation error: {}. Table transactionally removed.",
                         e
@@ -681,7 +708,7 @@ impl NetworkFirewall {
         if verify.state == DualStackState::FullyActive {
             Ok("Emergency kill-switch active: all inbound and outbound non-loopback traffic blocked via nftables inet table".to_string())
         } else {
-            let _ = runner.execute("nft", &["delete", "table", "inet", "netscope"]);
+            let _ = runner.execute("nft", &["delete", "table", "inet", Self::TABLE_KILLSWITCH]);
             Err("nftables killswitch activation verification failed; table transactionally removed.".to_string())
         }
     }
@@ -727,7 +754,8 @@ impl NetworkFirewall {
     ) -> Result<String, String> {
         match backend {
             FirewallBackend::Nftables => {
-                let res = runner.execute("nft", &["delete", "table", "inet", "netscope"]);
+                let res =
+                    runner.execute("nft", &["delete", "table", "inet", Self::TABLE_KILLSWITCH]);
                 match res {
                     Ok(out) if out.success || out.stderr.contains("No such file or directory") => {
                         let status =
@@ -737,7 +765,7 @@ impl NetworkFirewall {
                                 .to_string())
                         } else {
                             Err(
-                                "Deactivation verification failed: netscope table is still present"
+                                "Deactivation verification failed: netscope_killswitch table is still present"
                                     .to_string(),
                             )
                         }
@@ -800,7 +828,8 @@ impl NetworkFirewall {
                 state: DualStackState::Unavailable,
             },
             FirewallBackend::Nftables => {
-                let list = runner.execute("nft", &["list", "table", "inet", "netscope"]);
+                let list =
+                    runner.execute("nft", &["list", "table", "inet", Self::TABLE_KILLSWITCH]);
                 match list {
                     Ok(res) if res.success => {
                         let has_in = res.stdout.contains("iif != \"lo\" drop")
@@ -1010,7 +1039,7 @@ mod tests {
                     if c_clone.load(std::sync::atomic::Ordering::SeqCst) {
                         Ok(CommandResult {
                             success: true,
-                            stdout: "table inet netscope {\n  chain input {\n    iif != lo drop\n  }\n  chain output {\n    oif != lo drop\n  }\n}".to_string(),
+                            stdout: "table inet netscope_killswitch {\n  chain input {\n    iif != lo drop\n  }\n  chain output {\n    oif != lo drop\n  }\n}".to_string(),
                             stderr: String::new(),
                         })
                     } else {
@@ -1043,10 +1072,10 @@ mod tests {
         let executed = runner.executed.lock().unwrap();
         assert!(executed
             .iter()
-            .any(|c| c.contains("nft add table inet netscope")));
+            .any(|c| c.contains("nft add table inet netscope_killswitch")));
         assert!(executed
             .iter()
-            .any(|c| c.contains("nft add rule inet netscope input iif != lo drop")));
+            .any(|c| c.contains("nft add rule inet netscope_killswitch input iif != lo drop")));
     }
 
     #[test]
