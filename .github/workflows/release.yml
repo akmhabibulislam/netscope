@@ -28,13 +28,37 @@ jobs:
       - name: Compile Release Binaries
         run: cargo build --release --workspace
 
-      - name: Package Tarball
+      - name: Package Tarball & Generate SHA256
         run: |
           mkdir -p dist
           tar -czf dist/netscope-linux-x86_64.tar.gz -C target/release netscope netscope-cli
+          cd dist
+          sha256sum netscope-linux-x86_64.tar.gz > SHA256SUMS.txt
 
       - name: Upload Release Artifacts
         uses: actions/upload-artifact@v4
         with:
           name: netscope-binaries
-          path: dist/netscope-linux-x86_64.tar.gz
+          path: dist/*
+
+  build-fedora-rpm:
+    name: Build Fedora RPM Package
+    runs-on: ubuntu-latest
+    container:
+      image: fedora:40
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Install Fedora Dependencies
+        run: |
+          dnf install -y cargo rust gcc gtk4-devel libadwaita-devel sqlite-devel libcap-devel rpm-build desktop-file-utils tar findutils
+
+      - name: Build RPM
+        run: ./packaging/fedora/build-rpm.sh
+
+      - name: Upload Fedora RPM
+        uses: actions/upload-artifact@v4
+        with:
+          name: netscope-fedora-rpm
+          path: target/rpmbuild/RPMS/*/*.rpm

@@ -190,21 +190,71 @@ async fn main() -> Result<(), anyhow::Error> {
             println!("{table}");
         }
         Commands::Traffic { interface } => {
+            let ifaces = collector.poll_interfaces().await;
+            if let Some(ref target) = interface {
+                if !ifaces.iter().any(|i| i.name == *target) {
+                    let available: Vec<_> = ifaces.iter().map(|i| i.name.as_str()).collect();
+                    anyhow::bail!(
+                        "Interface '{}' not found. Available interfaces: {}",
+                        target,
+                        if available.is_empty() {
+                            "none".to_string()
+                        } else {
+                            available.join(", ")
+                        }
+                    );
+                }
+            }
+
             println!(
-                "Monitoring network bandwidth on {} (Ctrl+C to stop)...",
+                "Monitoring network bandwidth on {} (Press Ctrl+C to stop)...",
                 interface.as_deref().unwrap_or("all interfaces")
             );
+
             let mut interval = tokio::time::interval(std::time::Duration::from_secs(1));
-            for _ in 0..5 {
-                interval.tick().await;
-                let sample = collector.collect_bandwidth_sample().await;
-                println!(
-                    "[{}] Rx: {:.2} KB/s | Tx: {:.2} KB/s (Interface: {})",
-                    sample.timestamp.format("%H:%M:%S"),
-                    sample.rx_speed_bps / 8000.0,
-                    sample.tx_speed_bps / 8000.0,
-                    sample.active_interface.unwrap_or_else(|| "lo".to_string())
-                );
+            // First tick finishes immediately; consume it to align with 1-second cadence
+            interval.tick().await;
+
+            loop {
+                tokio::select! {
+                    _ = tokio::signal::ctrl_c() => {
+                        println!("\nTraffic monitoring stopped.");
+                        break;
+                    }
+                    _ = interval.tick() => {
+                        let sample = collector.collect_bandwidth_sample_for(interface.as_deref()).await;
+                        let rx_str = format_speed(sample.rx_speed_bps);
+                        let tx_str = format_speed(sample.tx_speed_bps);
+
+                        match (&interface, &sample.active_interface) {
+                            (Some(target), None) => {
+                                println!(
+                                    "[{}] Interface '{}' is currently unavailable or disconnected (Rx: 0 B/s | Tx: 0 B/s)",
+                                    sample.timestamp.format("%H:%M:%S"),
+                                    target
+                                );
+                            }
+                            (Some(target), Some(_)) => {
+                                println!(
+                                    "[{}] Rx: {:>10} | Tx: {:>10} (Interface: {})",
+                                    sample.timestamp.format("%H:%M:%S"),
+                                    rx_str,
+                                    tx_str,
+                                    target
+                                );
+                            }
+                            (None, active) => {
+                                println!(
+                                    "[{}] Rx: {:>10} | Tx: {:>10} (Active: {})",
+                                    sample.timestamp.format("%H:%M:%S"),
+                                    rx_str,
+                                    tx_str,
+                                    active.as_deref().unwrap_or("aggregated")
+                                );
+                            }
+                        }
+                    }
+                }
             }
         }
         Commands::Connections {
@@ -633,4 +683,53 @@ async fn main() -> Result<(), anyhow::Error> {
     }
 
     Ok(())
+}
+
+fn format_speed(bps: f64) -> String {
+    let bytes_per_sec = bps / 8.0;
+    if bytes_per_sec >= 1_000_000_000.0 {
+        format!("{:.2} GB/s", bytes_per_sec / 1_000_000_000.0)
+    } else if bytes_per_sec >= 1_000_000.0 {
+        format!("{:.2} MB/s", bytes_per_sec / 1_000_000.0)
+    } else if bytes_per_sec >= 1_000.0 {
+        format!("{:.2} KB/s", bytes_per_sec / 1_000.0)
+    } else {
+        format!("{:.0} B/s", bytes_per_sec)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_format_speed() {
+        assert_eq!(format_speed(0.0), "0 B/s");
+        assert_eq!(format_speed(800.0), "100 B/s");
+        assert_eq!(format_speed(8_000.0), "1.00 KB/s");
+        assert_eq!(format_speed(80_000_000.0), "10.00 MB/s");
+        assert_eq!(format_speed(8_000_000_000.0), "1.00 GB/s");
+    }
+
+    #[test]
+    fn test_cli_parsing_traffic_interface() {
+        let cli = Cli::try_parse_from(["netscope", "traffic", "--interface", "eth0"]).unwrap();
+        match cli.command {
+            Some(Commands::Traffic { interface }) => {
+                assert_eq!(interface.as_deref(), Some("eth0"));
+            }
+            _ => panic!("Expected Traffic command"),
+        }
+    }
+
+    #[test]
+    fn test_cli_parsing_traffic_no_interface() {
+        let cli = Cli::try_parse_from(["netscope", "traffic"]).unwrap();
+        match cli.command {
+            Some(Commands::Traffic { interface }) => {
+                assert_eq!(interface, None);
+            }
+            _ => panic!("Expected Traffic command"),
+        }
+    }
 }

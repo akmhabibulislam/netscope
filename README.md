@@ -57,51 +57,57 @@
 
 ## 📦 Installation Tutorial
 
-NetScope can be installed using pre-built distribution packages, the native desktop installer script, or built directly from source.
+NetScope supports native distribution packaging for **Fedora Workstation** and **Arch Linux / CachyOS**, automated installation scripts, and clean source compilation.
 
-### 🐧 Method 1: Arch Linux / CachyOS / EndeavourOS / Manjaro (`pacman`)
-
-If you are on an Arch-based distribution, install the ready-to-use pacman package:
-
-```bash
-# Build the package (or use pre-built package in packaging/arch/)
-cd packaging/arch
-makepkg -si
-```
-
-Or install directly with `pacman`:
-```bash
-sudo pacman -U packaging/arch/netscope-0.2.0-1-x86_64.pkg.tar.zst
-```
-
-This installs:
-- `/usr/bin/netscope` (GUI launcher symlink)
-- `/usr/bin/netscope-gui` (Main GTK4 desktop application)
-- `/usr/bin/netscope-cli` (Command-line companion tool)
-- `/usr/share/applications/netscope.desktop` (XDG desktop integration)
-- `/usr/share/icons/hicolor/scalable/apps/netscope.svg` (Application icon)
+See detailed installation guides:
+- 🔵 [Fedora Linux Installation Guide (RPM & DNF)](file:///home/kairox/Projects/personal/cyber_security/recon/net/docs/installation/fedora.md)
+- 🏹 [Arch Linux & CachyOS Installation Guide (PKGBUILD & Pacman)](file:///home/kairox/Projects/personal/cyber_security/recon/net/docs/installation/arch.md)
+- 🔐 [Permissions & Security Architecture](file:///home/kairox/Projects/personal/cyber_security/recon/net/docs/installation/permissions.md)
+- 🛠️ [Troubleshooting Guide](file:///home/kairox/Projects/personal/cyber_security/recon/net/docs/installation/troubleshooting.md)
 
 ---
 
-### 💻 Method 2: Universal Desktop Installer Script (`install.sh`)
+### 🔵 Method 1: Fedora Linux Native RPM (`dnf`)
 
-NetScope includes an installer script that installs the binaries, desktop menu entry, and icon for your current user without needing root privileges.
+NetScope provides native Fedora Workstation RPM packaging (Fedora 39, 40, 41):
 
 ```bash
 # Clone the repository
 git clone https://github.com/akmhabibulislam/netscope.git
 cd netscope
 
-# Build release binaries
-cargo build --release
-
-# Run the installer (installs to ~/.local/bin and ~/.local/share/applications)
-./install.sh
+# Run the native Fedora installer (handles dependencies & builds/installs RPM)
+./installers/fedora/install.sh
 ```
 
-To install system-wide to `/usr/local`:
+Or build and install the RPM manually:
 ```bash
-sudo PREFIX=/usr/local ./install.sh
+./packaging/fedora/build-rpm.sh
+sudo dnf install -y target/rpmbuild/RPMS/x86_64/netscope-*.rpm
+```
+
+---
+
+### 🐧 Method 2: Arch Linux / CachyOS / EndeavourOS / Manjaro (`pacman`)
+
+If you are on an Arch-based distribution:
+
+```bash
+cd packaging/arch
+makepkg -si
+```
+
+---
+
+### 💻 Method 3: Universal Distribution Installer (`install.sh`)
+
+NetScope includes a distribution-aware entry point that detects your running OS (Fedora, Arch, CachyOS) and routes to the correct native installation process:
+
+```bash
+git clone https://github.com/akmhabibulislam/netscope.git
+cd netscope
+
+./install.sh
 ```
 
 ---

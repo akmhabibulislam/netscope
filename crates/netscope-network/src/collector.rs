@@ -65,7 +65,7 @@ impl NetworkCollector {
             }
         }
 
-        if active_iface.is_none() {
+        if active_iface.is_none() && specific_iface.is_none() {
             active_iface = interfaces
                 .iter()
                 .find(|i| !i.is_loopback && i.is_up)

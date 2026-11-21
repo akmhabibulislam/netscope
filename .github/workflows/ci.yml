@@ -11,7 +11,7 @@ env:
 
 jobs:
   test:
-    name: Build & Test
+    name: Build, Lint & Workspace Tests
     runs-on: ubuntu-latest
     steps:
       - name: Checkout Code
@@ -20,7 +20,14 @@ jobs:
       - name: Install System Dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y libgtk-4-dev libadwaita-1-dev libsqlite3-dev libcap2-bin pkg-config
+          sudo apt-get install -y libgtk-4-dev libadwaita-1-dev libsqlite3-dev libcap2-bin pkg-config shellcheck
+
+      - name: Validate Shell Scripts
+        run: |
+          bash -n install.sh
+          bash -n installers/fedora/install.sh
+          bash -n installers/fedora/uninstall.sh
+          bash -n packaging/fedora/build-rpm.sh
 
       - name: Set up Rust Toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -41,3 +48,77 @@ jobs:
 
       - name: Run Automated Tests
         run: cargo test --workspace --verbose
+
+  fedora-rpm:
+    name: Fedora Workstation RPM Packaging & Verification
+    runs-on: ubuntu-latest
+    container:
+      image: fedora:40
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Install Fedora Build Dependencies
+        run: |
+          dnf install -y \
+            cargo \
+            rust \
+            gcc \
+            gtk4-devel \
+            libadwaita-devel \
+            sqlite-devel \
+            libcap-devel \
+            rpm-build \
+            desktop-file-utils \
+            tar \
+            findutils
+
+      - name: Build Native Fedora RPM
+        run: ./packaging/fedora/build-rpm.sh
+
+      - name: Validate Generated RPM Package
+        run: |
+          RPM_FILE=$(find target/rpmbuild/RPMS -name "netscope-*.rpm" | head -n 1)
+          echo "Inspecting package: ${RPM_FILE}"
+          rpm -qpi "${RPM_FILE}"
+          rpm -qpl "${RPM_FILE}"
+
+      - name: Test RPM Installation via DNF
+        run: |
+          RPM_FILE=$(find target/rpmbuild/RPMS -name "netscope-*.rpm" | head -n 1)
+          dnf install -y "${RPM_FILE}"
+          which netscope
+          which netscope-gui
+          which netscope-cli
+          test -f /usr/share/applications/netscope.desktop
+          desktop-file-validate /usr/share/applications/netscope.desktop
+
+  arch-pkg:
+    name: Arch Linux Packaging Verification
+    runs-on: ubuntu-latest
+    container:
+      image: archlinux:latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Update System & Install Dependencies
+        run: |
+          pacman -Syu --noconfirm
+          pacman -S --needed --noconfirm \
+            base-devel \
+            cargo \
+            rust \
+            gtk4 \
+            libadwaita \
+            sqlite \
+            iproute2 \
+            libcap \
+            pkgconf
+
+      - name: Compile and Package
+        run: |
+          useradd -m builder
+          chown -R builder:builder .
+          su builder -c "cd packaging/arch && makepkg -s --noconfirm"
+          ls -lh packaging/arch/*.pkg.tar.zst

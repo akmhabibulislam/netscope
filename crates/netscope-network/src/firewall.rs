@@ -55,7 +55,8 @@ pub enum DualStackState {
     IPv6Only,
     Inactive,
     PartiallyConfigured,
-    Unknown,
+    Unavailable,
+    Error,
 }
 
 impl std::fmt::Display for DualStackState {
@@ -66,7 +67,8 @@ impl std::fmt::Display for DualStackState {
             Self::IPv6Only => write!(f, "IPv6 Only Active"),
             Self::Inactive => write!(f, "Inactive"),
             Self::PartiallyConfigured => write!(f, "Partially Configured"),
-            Self::Unknown => write!(f, "Unknown / Verification Error"),
+            Self::Unavailable => write!(f, "Unavailable"),
+            Self::Error => write!(f, "Error / Verification Failed"),
         }
     }
 }
@@ -148,7 +150,7 @@ impl NetworkFirewall {
         }
     }
 
-    /// Block a specific remote IP using dedicated NetScope application-owned chain
+    /// Block a specific remote IP using dedicated NetScope application-owned chain or set
     pub fn block_ip(ip_str: &str) -> Result<String, String> {
         Self::block_ip_with(&SystemCommandRunner, ip_str)
     }
@@ -157,7 +159,16 @@ impl NetworkFirewall {
         runner: &dyn FirewallCommandRunner,
         ip_str: &str,
     ) -> Result<String, String> {
-        info!("Attempting to block IP: {}", ip_str);
+        let backend = Self::detect_backend_with(runner);
+        Self::block_ip_with_backend(runner, backend, ip_str)
+    }
+
+    pub fn block_ip_with_backend(
+        runner: &dyn FirewallCommandRunner,
+        backend: FirewallBackend,
+        ip_str: &str,
+    ) -> Result<String, String> {
+        info!("Attempting to block IP: {} via {:?}", ip_str, backend);
 
         let ip = IpAddr::from_str(ip_str.trim())
             .map_err(|_| format!("Invalid IP address format: '{}'", ip_str))?;
@@ -173,6 +184,101 @@ impl NetworkFirewall {
             );
         }
 
+        match backend {
+            FirewallBackend::Nftables => Self::block_ip_nftables(runner, ip),
+            FirewallBackend::Iptables => Self::block_ip_iptables(runner, ip),
+            FirewallBackend::Unavailable => Err(
+                "No supported firewall backend found. Ensure iptables or nftables is installed."
+                    .to_string(),
+            ),
+        }
+    }
+
+    fn block_ip_nftables(runner: &dyn FirewallCommandRunner, ip: IpAddr) -> Result<String, String> {
+        let (set_name, set_type, target_str) = match ip {
+            IpAddr::V4(v4) => ("blocked_v4", "ipv4_addr", v4.to_string()),
+            IpAddr::V6(v6) => ("blocked_v6", "ipv6_addr", v6.to_string()),
+        };
+
+        // 1. Ensure table inet netscope_block exists
+        let _ = runner.execute("nft", &["add", "table", "inet", "netscope_block"]);
+
+        // 2. Ensure set exists
+        let set_def = format!("{{ type {}; }}", set_type);
+        let _ = runner.execute(
+            "nft",
+            &["add", "set", "inet", "netscope_block", set_name, &set_def],
+        );
+
+        // 3. Ensure output chain exists
+        let _ = runner.execute(
+            "nft",
+            &[
+                "add",
+                "chain",
+                "inet",
+                "netscope_block",
+                "output",
+                "{ type filter hook output priority -5; policy accept; }",
+            ],
+        );
+
+        // 4. Ensure drop rule exists in output chain
+        let drop_rule = match ip {
+            IpAddr::V4(_) => "ip daddr @blocked_v4 drop",
+            IpAddr::V6(_) => "ip6 daddr @blocked_v6 drop",
+        };
+        let _ = runner.execute(
+            "nft",
+            &["add", "rule", "inet", "netscope_block", "output", drop_rule],
+        );
+
+        // 5. Check if element already exists
+        let elem_str = format!("{{ {} }}", target_str);
+        let check_res = runner.execute(
+            "nft",
+            &[
+                "get",
+                "element",
+                "inet",
+                "netscope_block",
+                set_name,
+                &elem_str,
+            ],
+        );
+        if let Ok(res) = check_res {
+            if res.success {
+                return Ok(format!(
+                    "IP {} is already blocked in NetScope nftables set",
+                    ip
+                ));
+            }
+        }
+
+        // 6. Add element to set
+        let out = runner.execute(
+            "nft",
+            &[
+                "add",
+                "element",
+                "inet",
+                "netscope_block",
+                set_name,
+                &elem_str,
+            ],
+        )?;
+
+        if out.success {
+            Ok(format!(
+                "IP {} blocked via NetScope nftables set {}",
+                ip, set_name
+            ))
+        } else {
+            Err(Self::format_perm_err(&out.stderr, "nft"))
+        }
+    }
+
+    fn block_ip_iptables(runner: &dyn FirewallCommandRunner, ip: IpAddr) -> Result<String, String> {
         let (cmd, target_str) = match ip {
             IpAddr::V4(v4) => ("iptables", v4.to_string()),
             IpAddr::V6(v6) => ("ip6tables", v6.to_string()),
@@ -231,7 +337,7 @@ impl NetworkFirewall {
         }
     }
 
-    /// Unblock a previously blocked IP from NetScope application-owned chain
+    /// Unblock a previously blocked IP from NetScope application-owned chain or set
     pub fn unblock_ip(ip_str: &str) -> Result<String, String> {
         Self::unblock_ip_with(&SystemCommandRunner, ip_str)
     }
@@ -240,9 +346,67 @@ impl NetworkFirewall {
         runner: &dyn FirewallCommandRunner,
         ip_str: &str,
     ) -> Result<String, String> {
+        let backend = Self::detect_backend_with(runner);
+        Self::unblock_ip_with_backend(runner, backend, ip_str)
+    }
+
+    pub fn unblock_ip_with_backend(
+        runner: &dyn FirewallCommandRunner,
+        backend: FirewallBackend,
+        ip_str: &str,
+    ) -> Result<String, String> {
         let ip = IpAddr::from_str(ip_str.trim())
             .map_err(|_| format!("Invalid IP address format: '{}'", ip_str))?;
 
+        match backend {
+            FirewallBackend::Nftables => Self::unblock_ip_nftables(runner, ip),
+            FirewallBackend::Iptables => Self::unblock_ip_iptables(runner, ip),
+            FirewallBackend::Unavailable => Err(
+                "No supported firewall backend found. Ensure iptables or nftables is installed."
+                    .to_string(),
+            ),
+        }
+    }
+
+    fn unblock_ip_nftables(
+        runner: &dyn FirewallCommandRunner,
+        ip: IpAddr,
+    ) -> Result<String, String> {
+        let (set_name, target_str) = match ip {
+            IpAddr::V4(v4) => ("blocked_v4", v4.to_string()),
+            IpAddr::V6(v6) => ("blocked_v6", v6.to_string()),
+        };
+
+        let elem_str = format!("{{ {} }}", target_str);
+        let res = runner.execute(
+            "nft",
+            &[
+                "delete",
+                "element",
+                "inet",
+                "netscope_block",
+                set_name,
+                &elem_str,
+            ],
+        )?;
+
+        if res.success {
+            Ok(format!(
+                "IP {} unblocked successfully from NetScope nftables set {}",
+                ip, set_name
+            ))
+        } else {
+            Err(format!(
+                "No active block rule found for IP {} in NetScope nftables set",
+                ip
+            ))
+        }
+    }
+
+    fn unblock_ip_iptables(
+        runner: &dyn FirewallCommandRunner,
+        ip: IpAddr,
+    ) -> Result<String, String> {
         let (cmd, target_str) = match ip {
             IpAddr::V4(v4) => ("iptables", v4.to_string()),
             IpAddr::V6(v6) => ("ip6tables", v6.to_string()),
@@ -439,6 +603,11 @@ impl NetworkFirewall {
     }
 
     fn activate_killswitch_nftables(runner: &dyn FirewallCommandRunner) -> Result<String, String> {
+        let status = Self::dual_stack_status_with(runner, FirewallBackend::Nftables);
+        if status.state == DualStackState::FullyActive {
+            return Ok("Emergency kill-switch is already active via nftables".to_string());
+        }
+
         let commands: [(&str, &[&str]); 5] = [
             ("nft", &["add", "table", "inet", "netscope"]),
             (
@@ -507,7 +676,14 @@ impl NetworkFirewall {
             }
         }
 
-        Ok("Emergency kill-switch active: all inbound and outbound non-loopback traffic blocked via nftables inet table".to_string())
+        // Verify nftables activation
+        let verify = Self::dual_stack_status_with(runner, FirewallBackend::Nftables);
+        if verify.state == DualStackState::FullyActive {
+            Ok("Emergency kill-switch active: all inbound and outbound non-loopback traffic blocked via nftables inet table".to_string())
+        } else {
+            let _ = runner.execute("nft", &["delete", "table", "inet", "netscope"]);
+            Err("nftables killswitch activation verification failed; table transactionally removed.".to_string())
+        }
     }
 
     fn execute_and_verify_rollback(
@@ -554,7 +730,17 @@ impl NetworkFirewall {
                 let res = runner.execute("nft", &["delete", "table", "inet", "netscope"]);
                 match res {
                     Ok(out) if out.success || out.stderr.contains("No such file or directory") => {
-                        Ok("Emergency kill-switch deactivated: nftables table removed".to_string())
+                        let status =
+                            Self::dual_stack_status_with(runner, FirewallBackend::Nftables);
+                        if status.state == DualStackState::Inactive {
+                            Ok("Emergency kill-switch deactivated: nftables table removed"
+                                .to_string())
+                        } else {
+                            Err(
+                                "Deactivation verification failed: netscope table is still present"
+                                    .to_string(),
+                            )
+                        }
                     }
                     Ok(out) => Err(format!(
                         "Failed to delete nftables table: {}",
@@ -607,78 +793,134 @@ impl NetworkFirewall {
         runner: &dyn FirewallCommandRunner,
         backend: FirewallBackend,
     ) -> DualStackStatus {
-        if backend == FirewallBackend::Nftables {
-            let list = runner.execute("nft", &["list", "table", "inet", "netscope"]);
-            if let Ok(res) = list {
-                if res.success
-                    && res.stdout.contains("iif != \"lo\" drop")
-                    && res.stdout.contains("oif != \"lo\" drop")
-                {
-                    return DualStackStatus {
-                        ipv4_active: true,
-                        ipv6_active: true,
-                        state: DualStackState::FullyActive,
-                    };
-                }
-            }
-            return DualStackStatus {
+        match backend {
+            FirewallBackend::Unavailable => DualStackStatus {
                 ipv4_active: false,
                 ipv6_active: false,
-                state: DualStackState::Inactive,
-            };
-        }
+                state: DualStackState::Unavailable,
+            },
+            FirewallBackend::Nftables => {
+                let list = runner.execute("nft", &["list", "table", "inet", "netscope"]);
+                match list {
+                    Ok(res) if res.success => {
+                        let has_in = res.stdout.contains("iif != \"lo\" drop")
+                            || res.stdout.contains("iif != lo drop");
+                        let has_out = res.stdout.contains("oif != \"lo\" drop")
+                            || res.stdout.contains("oif != lo drop");
+                        if has_in && has_out {
+                            return DualStackStatus {
+                                ipv4_active: true,
+                                ipv6_active: true,
+                                state: DualStackState::FullyActive,
+                            };
+                        } else if has_in || has_out {
+                            return DualStackStatus {
+                                ipv4_active: false,
+                                ipv6_active: false,
+                                state: DualStackState::PartiallyConfigured,
+                            };
+                        }
+                    }
+                    Ok(res) if res.stderr.contains("No such file or directory") => {
+                        return DualStackStatus {
+                            ipv4_active: false,
+                            ipv6_active: false,
+                            state: DualStackState::Inactive,
+                        };
+                    }
+                    Err(_) => {
+                        return DualStackStatus {
+                            ipv4_active: false,
+                            ipv6_active: false,
+                            state: DualStackState::Error,
+                        };
+                    }
+                    _ => {}
+                }
+                DualStackStatus {
+                    ipv4_active: false,
+                    ipv6_active: false,
+                    state: DualStackState::Inactive,
+                }
+            }
+            FirewallBackend::Iptables => {
+                // Iptables checks
+                let v4_out_jump =
+                    runner.execute("iptables", &["-C", "OUTPUT", "-j", Self::CHAIN_OUT]);
+                let v4_in_jump = runner.execute("iptables", &["-C", "INPUT", "-j", Self::CHAIN_IN]);
+                let v4_out_rule = runner.execute(
+                    "iptables",
+                    &["-C", Self::CHAIN_OUT, "!", "-o", "lo", "-j", "DROP"],
+                );
+                let v4_in_rule = runner.execute(
+                    "iptables",
+                    &["-C", Self::CHAIN_IN, "!", "-i", "lo", "-j", "DROP"],
+                );
 
-        // Iptables checks
-        let v4_out_jump = runner.execute("iptables", &["-C", "OUTPUT", "-j", Self::CHAIN_OUT]);
-        let v4_in_jump = runner.execute("iptables", &["-C", "INPUT", "-j", Self::CHAIN_IN]);
-        let v4_out_rule = runner.execute(
-            "iptables",
-            &["-C", Self::CHAIN_OUT, "!", "-o", "lo", "-j", "DROP"],
-        );
-        let v4_in_rule = runner.execute(
-            "iptables",
-            &["-C", Self::CHAIN_IN, "!", "-i", "lo", "-j", "DROP"],
-        );
+                let v6_out_jump =
+                    runner.execute("ip6tables", &["-C", "OUTPUT", "-j", Self::CHAIN_OUT]);
+                let v6_in_jump =
+                    runner.execute("ip6tables", &["-C", "INPUT", "-j", Self::CHAIN_IN]);
+                let v6_out_rule = runner.execute(
+                    "ip6tables",
+                    &["-C", Self::CHAIN_OUT, "!", "-o", "lo", "-j", "DROP"],
+                );
+                let v6_in_rule = runner.execute(
+                    "ip6tables",
+                    &["-C", Self::CHAIN_IN, "!", "-i", "lo", "-j", "DROP"],
+                );
 
-        let v6_out_jump = runner.execute("ip6tables", &["-C", "OUTPUT", "-j", Self::CHAIN_OUT]);
-        let v6_in_jump = runner.execute("ip6tables", &["-C", "INPUT", "-j", Self::CHAIN_IN]);
-        let v6_out_rule = runner.execute(
-            "ip6tables",
-            &["-C", Self::CHAIN_OUT, "!", "-o", "lo", "-j", "DROP"],
-        );
-        let v6_in_rule = runner.execute(
-            "ip6tables",
-            &["-C", Self::CHAIN_IN, "!", "-i", "lo", "-j", "DROP"],
-        );
+                let is_err = |r: &Result<CommandResult, String>| r.is_err();
+                if is_err(&v4_out_jump)
+                    || is_err(&v4_in_jump)
+                    || is_err(&v6_out_jump)
+                    || is_err(&v6_in_jump)
+                {
+                    return DualStackStatus {
+                        ipv4_active: false,
+                        ipv6_active: false,
+                        state: DualStackState::Error,
+                    };
+                }
 
-        let is_ok = |r: &Result<CommandResult, String>| matches!(r, Ok(out) if out.success);
+                let is_ok = |r: &Result<CommandResult, String>| matches!(r, Ok(out) if out.success);
 
-        let v4_all =
-            is_ok(&v4_out_jump) && is_ok(&v4_in_jump) && is_ok(&v4_out_rule) && is_ok(&v4_in_rule);
-        let v6_all =
-            is_ok(&v6_out_jump) && is_ok(&v6_in_jump) && is_ok(&v6_out_rule) && is_ok(&v6_in_rule);
+                let v4_all = is_ok(&v4_out_jump)
+                    && is_ok(&v4_in_jump)
+                    && is_ok(&v4_out_rule)
+                    && is_ok(&v4_in_rule);
+                let v6_all = is_ok(&v6_out_jump)
+                    && is_ok(&v6_in_jump)
+                    && is_ok(&v6_out_rule)
+                    && is_ok(&v6_in_rule);
 
-        let v4_any =
-            is_ok(&v4_out_jump) || is_ok(&v4_in_jump) || is_ok(&v4_out_rule) || is_ok(&v4_in_rule);
-        let v6_any =
-            is_ok(&v6_out_jump) || is_ok(&v6_in_jump) || is_ok(&v6_out_rule) || is_ok(&v6_in_rule);
+                let v4_any = is_ok(&v4_out_jump)
+                    || is_ok(&v4_in_jump)
+                    || is_ok(&v4_out_rule)
+                    || is_ok(&v4_in_rule);
+                let v6_any = is_ok(&v6_out_jump)
+                    || is_ok(&v6_in_jump)
+                    || is_ok(&v6_out_rule)
+                    || is_ok(&v6_in_rule);
 
-        let state = if v4_all && v6_all {
-            DualStackState::FullyActive
-        } else if v4_all && !v6_any {
-            DualStackState::IPv4Only
-        } else if v6_all && !v4_any {
-            DualStackState::IPv6Only
-        } else if !v4_any && !v6_any {
-            DualStackState::Inactive
-        } else {
-            DualStackState::PartiallyConfigured
-        };
+                let state = if v4_all && v6_all {
+                    DualStackState::FullyActive
+                } else if v4_all && !v6_any {
+                    DualStackState::IPv4Only
+                } else if v6_all && !v4_any {
+                    DualStackState::IPv6Only
+                } else if !v4_any && !v6_any {
+                    DualStackState::Inactive
+                } else {
+                    DualStackState::PartiallyConfigured
+                };
 
-        DualStackStatus {
-            ipv4_active: v4_all,
-            ipv6_active: v6_all,
-            state,
+                DualStackStatus {
+                    ipv4_active: v4_all,
+                    ipv6_active: v6_all,
+                    state,
+                }
+            }
         }
     }
 
@@ -758,6 +1000,56 @@ mod tests {
     }
 
     #[test]
+    fn test_successful_activation_nftables() {
+        let created = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let c_clone = created.clone();
+        let runner = MockCommandRunner {
+            executed: Mutex::new(Vec::new()),
+            handler: Box::new(move |cmd, args| {
+                if cmd == "nft" && args.contains(&"list") {
+                    if c_clone.load(std::sync::atomic::Ordering::SeqCst) {
+                        Ok(CommandResult {
+                            success: true,
+                            stdout: "table inet netscope {\n  chain input {\n    iif != lo drop\n  }\n  chain output {\n    oif != lo drop\n  }\n}".to_string(),
+                            stderr: String::new(),
+                        })
+                    } else {
+                        Ok(CommandResult {
+                            success: false,
+                            stdout: String::new(),
+                            stderr: "Error: No such file or directory".to_string(),
+                        })
+                    }
+                } else if cmd == "nft" && args.contains(&"rule") {
+                    c_clone.store(true, std::sync::atomic::Ordering::SeqCst);
+                    Ok(CommandResult {
+                        success: true,
+                        stdout: String::new(),
+                        stderr: String::new(),
+                    })
+                } else {
+                    Ok(CommandResult {
+                        success: true,
+                        stdout: String::new(),
+                        stderr: String::new(),
+                    })
+                }
+            }),
+        };
+
+        let res =
+            NetworkFirewall::activate_emergency_killswitch_with(&runner, FirewallBackend::Nftables);
+        assert!(res.is_ok());
+        let executed = runner.executed.lock().unwrap();
+        assert!(executed
+            .iter()
+            .any(|c| c.contains("nft add table inet netscope")));
+        assert!(executed
+            .iter()
+            .any(|c| c.contains("nft add rule inet netscope input iif != lo drop")));
+    }
+
+    #[test]
     fn test_successful_activation_iptables() {
         let runner = MockCommandRunner {
             executed: Mutex::new(Vec::new()),
@@ -790,7 +1082,79 @@ mod tests {
     }
 
     #[test]
-    fn test_activation_rollback_on_single_rule_failure() {
+    fn test_partial_ipv4_activation_failure_rolls_back() {
+        let active_rules = std::sync::Arc::new(Mutex::new(std::collections::HashSet::new()));
+        let active_clone = active_rules.clone();
+
+        let runner = MockCommandRunner {
+            executed: Mutex::new(Vec::new()),
+            handler: Box::new(move |cmd, args| {
+                if cmd == "iptables"
+                    && args.contains(&"OUTPUT")
+                    && args.contains(&"-j")
+                    && args.contains(&"-I")
+                {
+                    return Ok(CommandResult {
+                        success: false,
+                        stdout: String::new(),
+                        stderr: "Permission denied inserting IPv4 OUTPUT rule".to_string(),
+                    });
+                }
+
+                let mut set = active_clone.lock().unwrap();
+                if args.contains(&"-I") {
+                    let key = format!("{} {}", cmd, args.join(" "));
+                    set.insert(key);
+                    Ok(CommandResult {
+                        success: true,
+                        stdout: String::new(),
+                        stderr: String::new(),
+                    })
+                } else if args.contains(&"-D") {
+                    let target = args.last().unwrap_or(&"");
+                    set.retain(|r| !r.contains(target));
+                    Ok(CommandResult {
+                        success: true,
+                        stdout: String::new(),
+                        stderr: String::new(),
+                    })
+                } else if args.contains(&"-C") {
+                    let target = args.last().unwrap_or(&"");
+                    let exists = set.iter().any(|r| r.contains(target));
+                    Ok(CommandResult {
+                        success: exists,
+                        stdout: String::new(),
+                        stderr: if exists {
+                            String::new()
+                        } else {
+                            "Rule not found".to_string()
+                        },
+                    })
+                } else {
+                    Ok(CommandResult {
+                        success: true,
+                        stdout: String::new(),
+                        stderr: String::new(),
+                    })
+                }
+            }),
+        };
+
+        let res =
+            NetworkFirewall::activate_emergency_killswitch_with(&runner, FirewallBackend::Iptables);
+        assert!(res.is_err());
+        let err = res.unwrap_err();
+        assert!(err.contains("transactionally rolled back"));
+
+        let executed = runner.executed.lock().unwrap();
+        // Verify rollback cleaned up any pre-existing IPv4 rule
+        assert!(executed
+            .iter()
+            .any(|c| c.contains("iptables -D INPUT -j NETSCOPE_IN")));
+    }
+
+    #[test]
+    fn test_partial_ipv6_activation_failure_rolls_back() {
         let active_rules = std::sync::Arc::new(Mutex::new(std::collections::HashSet::new()));
         let active_clone = active_rules.clone();
 
@@ -805,7 +1169,7 @@ mod tests {
                     return Ok(CommandResult {
                         success: false,
                         stdout: String::new(),
-                        stderr: "Permission denied inserting rule".to_string(),
+                        stderr: "Permission denied inserting IPv6 rule".to_string(),
                     });
                 }
 
@@ -1008,6 +1372,103 @@ mod tests {
     }
 
     #[test]
+    fn test_inaccurate_or_partially_configured_firewall_state() {
+        // Test 1: Partially configured iptables (IPv4 jump exists, but drop rule missing)
+        let runner_partial = MockCommandRunner {
+            executed: Mutex::new(Vec::new()),
+            handler: Box::new(|cmd, args| {
+                if cmd == "iptables" && args.contains(&"-j") && args.contains(&"OUTPUT") {
+                    Ok(CommandResult {
+                        success: true,
+                        stdout: String::new(),
+                        stderr: String::new(),
+                    })
+                } else {
+                    Ok(CommandResult {
+                        success: false,
+                        stdout: String::new(),
+                        stderr: "No rule".to_string(),
+                    })
+                }
+            }),
+        };
+        let status_partial =
+            NetworkFirewall::dual_stack_status_with(&runner_partial, FirewallBackend::Iptables);
+        assert_eq!(status_partial.state, DualStackState::PartiallyConfigured);
+
+        // Test 2: Unavailable backend
+        let runner_unavail = MockCommandRunner {
+            executed: Mutex::new(Vec::new()),
+            handler: Box::new(|_cmd, _args| {
+                Ok(CommandResult {
+                    success: false,
+                    stdout: String::new(),
+                    stderr: String::new(),
+                })
+            }),
+        };
+        let status_unavail =
+            NetworkFirewall::dual_stack_status_with(&runner_unavail, FirewallBackend::Unavailable);
+        assert_eq!(status_unavail.state, DualStackState::Unavailable);
+
+        // Test 3: Command error produces Error state
+        let runner_err = MockCommandRunner {
+            executed: Mutex::new(Vec::new()),
+            handler: Box::new(|_cmd, _args| Err("Invocation broken pipe".to_string())),
+        };
+        let status_err =
+            NetworkFirewall::dual_stack_status_with(&runner_err, FirewallBackend::Iptables);
+        assert_eq!(status_err.state, DualStackState::Error);
+    }
+
+    #[test]
+    fn test_nftables_block_and_unblock_ip() {
+        let runner = MockCommandRunner {
+            executed: Mutex::new(Vec::new()),
+            handler: Box::new(|cmd, args| {
+                if cmd == "nft" && args.contains(&"get") {
+                    // Element not yet added
+                    Ok(CommandResult {
+                        success: false,
+                        stdout: String::new(),
+                        stderr: "No such file or directory".to_string(),
+                    })
+                } else {
+                    Ok(CommandResult {
+                        success: true,
+                        stdout: String::new(),
+                        stderr: String::new(),
+                    })
+                }
+            }),
+        };
+
+        let block_res = NetworkFirewall::block_ip_with_backend(
+            &runner,
+            FirewallBackend::Nftables,
+            "198.51.100.22",
+        );
+        assert!(block_res.is_ok());
+        {
+            let executed = runner.executed.lock().unwrap();
+            assert!(executed
+                .iter()
+                .any(|c| c.contains("nft add table inet netscope_block")));
+            assert!(executed
+                .iter()
+                .any(|c| c
+                    .contains("nft add element inet netscope_block blocked_v4 { 198.51.100.22 }")));
+        }
+
+        let unblock_res = NetworkFirewall::unblock_ip_with_backend(
+            &runner,
+            FirewallBackend::Nftables,
+            "198.51.100.22",
+        );
+        assert!(unblock_res.is_ok());
+    }
+
+    #[test]
     fn test_block_and_unblock_ip_in_dedicated_chain() {
         let delete_count = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let dc = delete_count.clone();
@@ -1058,7 +1519,11 @@ mod tests {
             }),
         };
 
-        let block_res = NetworkFirewall::block_ip_with(&runner, "203.0.113.5");
+        let block_res = NetworkFirewall::block_ip_with_backend(
+            &runner,
+            FirewallBackend::Iptables,
+            "203.0.113.5",
+        );
         assert!(block_res.is_ok());
         {
             let executed = runner.executed.lock().unwrap();
@@ -1067,7 +1532,11 @@ mod tests {
                 .any(|c| c.contains("iptables -A NETSCOPE_BLOCK -d 203.0.113.5 -j DROP")));
         }
 
-        let unblock_res = NetworkFirewall::unblock_ip_with(&runner, "203.0.113.5");
+        let unblock_res = NetworkFirewall::unblock_ip_with_backend(
+            &runner,
+            FirewallBackend::Iptables,
+            "203.0.113.5",
+        );
         assert!(unblock_res.is_ok());
     }
 

@@ -1,84 +1,126 @@
 #!/usr/bin/env bash
-# NetScope Linux Desktop Installer
-# Installs NetScope binaries, desktop integration, icons, and capabilities.
+# ==============================================================================
+# NetScope — Distribution-Aware Universal Linux Installer
+# Detects operating system and routes to the appropriate native installation flow.
+# Supported Distributions: Fedora, Arch Linux, CachyOS
+# ==============================================================================
+set -euo pipefail
 
-set -e
+BOLD="\033[1m"
+GREEN="\033[0;32m"
+BLUE="\033[0;34m"
+YELLOW="\033[1;33m"
+RED="\033[0;31m"
+RESET="\033[0m"
+
+log_info() { echo -e "${BLUE}[*]${RESET} ${1}"; }
+log_ok() { echo -e "${GREEN}[+]${RESET} ${1}"; }
+log_warn() { echo -e "${YELLOW}[!]${RESET} ${1}"; }
+log_err() { echo -e "${RED}[ERROR]${RESET} ${1}"; }
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-BIN_GUI="$SCRIPT_DIR/target/release/netscope"
-BIN_CLI="$SCRIPT_DIR/target/release/netscope-cli"
-DESKTOP_SRC="$SCRIPT_DIR/resources/netscope.desktop"
-ICON_SRC="$SCRIPT_DIR/resources/icons/netscope.svg"
 
-# Determine installation scope
-PREFIX="${PREFIX:-}"
-if [ -z "$PREFIX" ]; then
-    if [ "$EUID" -eq 0 ]; then
-        PREFIX="/usr/local"
-    else
-        PREFIX="$HOME/.local"
-    fi
-fi
+echo -e "${BOLD}======================================================"
+echo -e "   NetScope — Linux Distribution Installer"
+echo -e "======================================================${RESET}"
 
-BIN_DIR="$PREFIX/bin"
-APP_DIR="$PREFIX/share/applications"
-ICON_DIR="$PREFIX/share/icons/hicolor/scalable/apps"
-DOC_DIR="$PREFIX/share/doc/netscope"
-
-echo "=== Installing NetScope 2.0 ==="
-echo "Target Prefix: $PREFIX"
-
-if [ ! -f "$BIN_GUI" ]; then
-    echo "Error: Release binary '$BIN_GUI' not found."
-    echo "Please build first using: cargo build --release"
+if [ ! -f /etc/os-release ]; then
+    log_err "Cannot detect operating system: /etc/os-release is missing."
+    echo "Please refer to docs/installation/ for manual installation instructions."
     exit 1
 fi
 
-mkdir -p "$BIN_DIR" "$APP_DIR" "$ICON_DIR" "$DOC_DIR"
+# shellcheck source=/dev/null
+source /etc/os-release
+OS_ID="${ID:-}"
+OS_LIKE="${ID_LIKE:-}"
 
-echo "Installing binaries..."
-install -Dm755 "$BIN_GUI" "$BIN_DIR/netscope-gui"
-# Create a symlink or binary for netscope -> netscope-gui
-ln -sf "$BIN_DIR/netscope-gui" "$BIN_DIR/netscope"
+log_info "Detected operating system: ${PRETTY_NAME:-unknown} (ID: ${OS_ID})"
 
-if [ -f "$BIN_CLI" ]; then
-    install -Dm755 "$BIN_CLI" "$BIN_DIR/netscope-cli"
-    echo "Installed: $BIN_DIR/netscope-cli"
-fi
+case "${OS_ID}" in
+    fedora)
+        log_info "Routing to Fedora native RPM installation process..."
+        exec "${SCRIPT_DIR}/installers/fedora/install.sh" "$@"
+        ;;
+    arch|cachyos|endeavouros|manjaro)
+        log_info "Detected Arch-based Linux (${OS_ID}). Using Arch packaging flow..."
+        
+        # Check required build/runtime dependencies
+        MISSING_DEPS=()
+        for dep in gtk4 libadwaita sqlite iproute2 libcap cargo rust; do
+            if ! pacman -Q "${dep}" &>/dev/null; then
+                MISSING_DEPS+=("${dep}")
+            fi
+        done
 
-echo "Installed: $BIN_DIR/netscope-gui"
-echo "Installed: $BIN_DIR/netscope"
+        if [ ${#MISSING_DEPS[@]} -gt 0 ]; then
+            log_warn "Missing required dependencies: ${MISSING_DEPS[*]}"
+            read -r -p "Install missing dependencies with 'sudo pacman -S'? [Y/n]: " CONFIRM_PACMAN
+            CONFIRM_PACMAN=${CONFIRM_PACMAN:-Y}
+            if [[ "${CONFIRM_PACMAN}" =~ ^[Yy]$ ]]; then
+                sudo pacman -S --needed "${MISSING_DEPS[@]}"
+            else
+                log_err "Cannot proceed without required dependencies."
+                exit 1
+            fi
+        fi
 
-echo "Installing desktop shortcut & icon..."
-install -Dm644 "$ICON_SRC" "$ICON_DIR/netscope.svg"
+        log_info "Building release binaries from repository source..."
+        cd "${SCRIPT_DIR}"
+        cargo build --release --workspace
 
-# Dynamic Exec path resolution:
-# Ensure desktop launcher points to the exact absolute binary path of the target prefix
-sed "s|^Exec=.*|Exec=$BIN_DIR/netscope-gui|" "$DESKTOP_SRC" > "$APP_DIR/netscope.desktop"
-chmod 644 "$APP_DIR/netscope.desktop"
-echo "Configured launcher: $APP_DIR/netscope.desktop -> $BIN_DIR/netscope-gui"
+        PREFIX="${PREFIX:-/usr/local}"
+        BIN_DIR="${PREFIX}/bin"
+        APP_DIR="${PREFIX}/share/applications"
+        ICON_DIR="${PREFIX}/share/icons/hicolor/scalable/apps"
 
-# Optional: setcap for unprivileged raw packet capture if running as root or with sudo
-if command -v setcap >/dev/null 2>&1; then
-    if [ "$EUID" -eq 0 ]; then
-        echo "Granting cap_net_raw,cap_net_admin to $BIN_DIR/netscope-gui for hardware packet sniffer..."
-        setcap cap_net_raw,cap_net_admin+eip "$BIN_DIR/netscope-gui" || true
-    else
-        echo "Tip: Run 'sudo setcap cap_net_raw,cap_net_admin+eip $BIN_DIR/netscope-gui' if you want unprivileged raw packet sniffing."
-    fi
-fi
+        SUDO_CMD=""
+        if [[ $EUID -ne 0 ]]; then
+            SUDO_CMD="sudo"
+        fi
 
-# Update desktop database if available
-if command -v update-desktop-database >/dev/null 2>&1; then
-    update-desktop-database "$APP_DIR" 2>/dev/null || true
-fi
+        log_info "Installing binaries and desktop integration to ${PREFIX}..."
+        ${SUDO_CMD} install -Dm755 "${SCRIPT_DIR}/target/release/netscope" "${BIN_DIR}/netscope-gui"
+        ${SUDO_CMD} ln -sf "netscope-gui" "${BIN_DIR}/netscope"
+        ${SUDO_CMD} install -Dm755 "${SCRIPT_DIR}/target/release/netscope-cli" "${BIN_DIR}/netscope-cli"
+        ${SUDO_CMD} install -Dm644 "${SCRIPT_DIR}/resources/netscope.desktop" "${APP_DIR}/netscope.desktop"
+        ${SUDO_CMD} install -Dm644 "${SCRIPT_DIR}/resources/icons/netscope.svg" "${ICON_DIR}/netscope.svg"
 
-# Update icon cache if available
-if command -v gtk-update-icon-cache >/dev/null 2>&1; then
-    gtk-update-icon-cache -f -t "$PREFIX/share/icons/hicolor" 2>/dev/null || true
-fi
+        # Configure network capabilities on CLI companion
+        if command -v setcap &>/dev/null; then
+            log_info "Setting network capabilities (CAP_NET_RAW, CAP_NET_ADMIN) on netscope-cli..."
+            ${SUDO_CMD} setcap cap_net_raw,cap_net_admin=eip "${BIN_DIR}/netscope-cli" || true
+        fi
 
-echo ""
-echo "=== NetScope Successfully Installed! ==="
-echo "Launch from your desktop application launcher (App Menu / Rofi / Wofi / GNOME / KDE)"
-echo "Or run in terminal: $BIN_DIR/netscope"
+        if command -v update-desktop-database &>/dev/null; then
+            ${SUDO_CMD} update-desktop-database "${APP_DIR}" 2>/dev/null || true
+        fi
+        if command -v gtk4-update-icon-cache &>/dev/null; then
+            ${SUDO_CMD} gtk4-update-icon-cache "${PREFIX}/share/icons/hicolor" 2>/dev/null || true
+        fi
+
+        echo
+        log_ok "NetScope successfully installed on ${PRETTY_NAME}!"
+        echo "Launch GUI: netscope"
+        echo "Launch CLI: netscope-cli status"
+        ;;
+    *)
+        if [[ "${OS_LIKE}" =~ (fedora|rhel) ]]; then
+            log_info "Distribution is Fedora/RHEL-like. Routing to Fedora RPM installer..."
+            exec "${SCRIPT_DIR}/installers/fedora/install.sh" "$@"
+        elif [[ "${OS_LIKE}" =~ arch ]]; then
+            log_info "Distribution is Arch-like. Routing to Arch installation..."
+            exec "${SCRIPT_DIR}/install.sh" "$@"
+        else
+            echo
+            log_warn "Distribution '${OS_ID}' (${PRETTY_NAME:-unknown}) does not have an automated native installer."
+            echo
+            echo "You can manually install NetScope from source on any modern Linux system:"
+            echo "  1. Install GTK4, Libadwaita, SQLite, and Rust toolchain."
+            echo "  2. Run: cargo build --release"
+            echo "  3. Copy 'target/release/netscope' and 'target/release/netscope-cli' to /usr/local/bin/"
+            echo "  4. See docs/installation/troubleshooting.md for detailed instructions."
+            exit 1
+        fi
+        ;;
+esac

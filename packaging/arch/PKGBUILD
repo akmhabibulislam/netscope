@@ -4,11 +4,17 @@ pkgver=0.2.0
 pkgrel=1
 pkgdesc="A professional, cross-distribution Linux network intelligence and packet monitoring desktop application"
 arch=('x86_64')
-url="https://github.com/netscope/netscope"
-license=('MIT' 'Apache-2.0')
+url="https://github.com/akmhabibulislam/netscope"
+license=('MIT')
 depends=('gtk4' 'libadwaita' 'sqlite' 'iproute2' 'libcap')
+makedepends=('cargo' 'rust')
 options=('!strip' '!debug')
 source=()
+
+build() {
+    cd "$startdir/../.."
+    cargo build --release --workspace
+}
 
 package() {
     cd "$startdir/../.."
@@ -21,5 +27,6 @@ package() {
 
     install -Dm644 "resources/netscope.desktop" "$pkgdir/usr/share/applications/netscope.desktop"
     install -Dm644 "resources/icons/netscope.svg" "$pkgdir/usr/share/icons/hicolor/scalable/apps/netscope.svg"
+    install -Dm644 "LICENSE-MIT" "$pkgdir/usr/share/licenses/$pkgname/LICENSE-MIT"
     install -Dm644 "README.md" "$pkgdir/usr/share/doc/$pkgname/README.md"
 }

@@ -138,6 +138,18 @@ impl LiveTrafficSniffer {
             return Ok(());
         }
 
+        // Clean up any lingering worker before starting a new one
+        if let Ok(mut h) = self.worker_handle.lock() {
+            if let Some(old_handle) = h.take() {
+                if let Ok(mut sig) = self.stop_signal.lock() {
+                    if let Some(tx) = sig.take() {
+                        let _ = tx.send(());
+                    }
+                }
+                let _ = old_handle.join();
+            }
+        }
+
         *state_guard = CaptureState::Starting;
         if let Ok(mut err) = self.last_error.lock() {
             *err = None;
@@ -259,6 +271,7 @@ impl LiveTrafficSniffer {
         let buffer_arc = self.captured_packets.clone();
         let flow_tracker_arc = self.flow_tracker.clone();
         let local_ips_arc = self.local_ips.clone();
+        let last_error_arc = self.last_error.clone();
 
         *state_guard = CaptureState::Running;
 
@@ -287,6 +300,25 @@ impl LiveTrafficSniffer {
                         &mut saddr_len,
                     )
                 };
+
+                if n < 0 {
+                    let errno = unsafe { *libc::__errno_location() };
+                    if errno == libc::EAGAIN || errno == libc::EWOULDBLOCK || errno == libc::EINTR {
+                        continue;
+                    }
+                    let err_msg = format!(
+                        "Fatal packet capture error on AF_PACKET socket (errno: {})",
+                        errno
+                    );
+                    warn!("{}", err_msg);
+                    if let Ok(mut err) = last_error_arc.lock() {
+                        *err = Some(err_msg);
+                    }
+                    if let Ok(mut st) = state_arc.lock() {
+                        *st = CaptureState::Failed;
+                    }
+                    break;
+                }
 
                 if n > 14 {
                     let packet_bytes = &raw_buffer[..n as usize];
@@ -367,7 +399,9 @@ impl LiveTrafficSniffer {
 
         if let Ok(mut h) = self.worker_handle.lock() {
             if let Some(handle) = h.take() {
-                let _ = handle.join();
+                if let Err(e) = handle.join() {
+                    warn!("Worker thread panicked during capture join: {:?}", e);
+                }
             }
         }
 

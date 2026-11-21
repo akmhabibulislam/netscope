@@ -8,7 +8,10 @@ use netscope_core::{
 pub use pipeline::{FeedProvider, ThreatIndicator, ThreatPipeline};
 use std::collections::{HashMap, HashSet};
 use std::net::IpAddr;
-pub use threat_intel::{ThreatEntry, ThreatIntel, ThreatMatch};
+use std::str::FromStr;
+pub use threat_intel::{
+    DomainThreatEntry, DomainThreatMatch, ThreatEntry, ThreatIntel, ThreatMatch,
+};
 
 pub struct SecurityRuleEngine {
     whitelisted_ips: HashSet<String>,
@@ -257,7 +260,24 @@ impl SecurityRuleEngine {
     pub fn ingest_indicators(&mut self, indicators: Vec<ThreatIndicator>) -> Result<usize, String> {
         let mut count = 0;
         for ind in indicators {
-            if let Ok(ip) = std::str::FromStr::from_str(&ind.indicator) {
+            if ind.indicator_type.eq_ignore_ascii_case("Domain")
+                || (!ind.indicator.contains(':')
+                    && ind.indicator.contains('.')
+                    && std::net::IpAddr::from_str(&ind.indicator).is_err())
+            {
+                if let Some(norm) = ThreatIntel::normalize_domain(&ind.indicator) {
+                    self.threat_intel.add_domain_ioc(DomainThreatEntry {
+                        domain: norm,
+                        category: ind.category,
+                        description: format!("Automated feed ingestion from {}", ind.source),
+                        source: ind.source,
+                        confidence: ind.confidence,
+                        first_seen: ind.first_seen,
+                        expires_at: ind.expires_at,
+                    });
+                    count += 1;
+                }
+            } else if let Ok(ip) = std::str::FromStr::from_str(&ind.indicator) {
                 self.threat_intel.add_ioc(ThreatEntry {
                     ip,
                     category: ind.category,
@@ -272,5 +292,208 @@ impl SecurityRuleEngine {
         }
         self.threat_intel.save_to_disk()?;
         Ok(count)
+    }
+
+    /// Evaluates a DNS record against threat intelligence domains and answers
+    pub fn evaluate_dns(&mut self, record: &netscope_core::DnsRecord) -> Option<SecurityAlert> {
+        let now = Utc::now();
+
+        // 1. Check queried domain
+        if let Some(matched) = self.threat_intel.check_domain(&record.query) {
+            return Some(SecurityAlert {
+                id: format!("ALERT-DNS-DOMAIN-{}", now.timestamp_millis()),
+                timestamp: now,
+                severity: AlertSeverity::High,
+                title: format!("Malicious Domain Query: {}", matched.domain),
+                message: format!(
+                    "DNS query for '{}' matched threat intelligence signature: {} (Source: {}).",
+                    matched.domain, matched.threat_type, matched.source
+                ),
+                rule_id: "RULE_THREAT_DOMAIN".to_string(),
+                affected_process: record.process_name.clone(),
+                remote_ip: None,
+                remote_port: Some(53),
+                recommendations: vec![
+                    "Inspect originating process or browser tab".to_string(),
+                    "Block domain resolution using local DNS policy or /etc/hosts".to_string(),
+                ],
+                reviewed: false,
+            });
+        }
+
+        // 2. Check resolved IP in response if available
+        if let Some(ref resp) = record.response {
+            for part in resp.split(',') {
+                let trimmed = part.trim();
+                if let Ok(ip) = std::net::IpAddr::from_str(trimmed) {
+                    if let Some(matched) = self.threat_intel.check_ip(ip) {
+                        let is_tor = matched.threat_type.contains("Tor")
+                            || matched.threat_type.contains("Anonymization");
+                        return Some(SecurityAlert {
+                            id: format!("ALERT-DNS-IP-{}", now.timestamp_millis()),
+                            timestamp: now,
+                            severity: if is_tor {
+                                AlertSeverity::Medium
+                            } else {
+                                AlertSeverity::Critical
+                            },
+                            title: if is_tor {
+                                format!("DNS Resolved to Privacy Relay: {}", matched.threat_type)
+                            } else {
+                                format!("DNS Resolved to Malicious Host: {}", matched.threat_type)
+                            },
+                            message: format!(
+                                "DNS query '{}' resolved to known indicator {}: {} (Source: {}).",
+                                record.query, ip, matched.description, matched.source
+                            ),
+                            rule_id: "RULE_THREAT_DNS_IP".to_string(),
+                            affected_process: record.process_name.clone(),
+                            remote_ip: Some(ip),
+                            remote_port: Some(53),
+                            recommendations: vec![
+                                "Review network traffic destined to this resolved IP address"
+                                    .to_string(),
+                            ],
+                            reviewed: false,
+                        });
+                    }
+                }
+            }
+        }
+
+        None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use netscope_core::DnsRecord;
+    use std::net::Ipv4Addr;
+
+    #[test]
+    fn test_ingest_indicators_all_three_types() {
+        let mut engine = SecurityRuleEngine::new(vec![], vec![]);
+        let now = Utc::now();
+        let indicators = vec![
+            ThreatIndicator {
+                indicator: "194.26.29.115".to_string(),
+                indicator_type: "IPv4".to_string(),
+                category: "Malware C2".to_string(),
+                source: "Test".to_string(),
+                confidence: 95,
+                first_seen: now,
+                last_seen: now,
+                expires_at: Some(now + chrono::Duration::days(10)),
+            },
+            ThreatIndicator {
+                indicator: "2001:4860:4860::8888".to_string(),
+                indicator_type: "IPv6".to_string(),
+                category: "Botnet Node".to_string(),
+                source: "Test".to_string(),
+                confidence: 90,
+                first_seen: now,
+                last_seen: now,
+                expires_at: Some(now + chrono::Duration::days(10)),
+            },
+            ThreatIndicator {
+                indicator: "c2.bad-actor-domain.com".to_string(),
+                indicator_type: "Domain".to_string(),
+                category: "Malicious Payload Host".to_string(),
+                source: "URLhaus".to_string(),
+                confidence: 99,
+                first_seen: now,
+                last_seen: now,
+                expires_at: Some(now + chrono::Duration::days(10)),
+            },
+        ];
+
+        let count = engine
+            .ingest_indicators(indicators)
+            .expect("Must ingest successfully");
+        assert_eq!(count, 3);
+
+        // Verify IP check matches
+        let ip_match = engine
+            .threat_intel()
+            .check_ip(IpAddr::V4(Ipv4Addr::new(194, 26, 29, 115)));
+        assert!(ip_match.is_some());
+
+        // Verify Domain check matches
+        let dom_match = engine
+            .threat_intel()
+            .check_domain("c2.bad-actor-domain.com");
+        assert!(dom_match.is_some());
+        assert_eq!(dom_match.unwrap().confidence, 99);
+    }
+
+    #[test]
+    fn test_evaluate_dns_with_malicious_domain_and_ip() {
+        let mut engine = SecurityRuleEngine::new(vec![], vec![]);
+        let now = Utc::now();
+
+        engine.threat_intel_mut().add_domain_ioc(DomainThreatEntry {
+            domain: "phishing-bank.net".to_string(),
+            category: "Credential Harvester".to_string(),
+            description: "Fake banking portal".to_string(),
+            source: "PhishTank".to_string(),
+            confidence: 95,
+            first_seen: now,
+            expires_at: Some(now + chrono::Duration::days(5)),
+        });
+
+        let record = DnsRecord {
+            id: "dns-1".to_string(),
+            timestamp: now,
+            query: "phishing-bank.net".to_string(),
+            qtype: "A".to_string(),
+            response: Some("93.184.216.34".to_string()),
+            duration_ms: Some(15),
+            resolver: "1.1.1.1".to_string(),
+            process_name: Some("curl".to_string()),
+        };
+
+        let alert = engine
+            .evaluate_dns(&record)
+            .expect("Must generate alert for phishing domain");
+        assert_eq!(alert.rule_id, "RULE_THREAT_DOMAIN");
+        assert_eq!(alert.severity, AlertSeverity::High);
+        assert!(alert.title.contains("phishing-bank.net"));
+    }
+
+    #[test]
+    fn test_tor_exit_node_never_classified_as_malware() {
+        let mut engine = SecurityRuleEngine::new(vec![], vec![]);
+        let tor_ip = IpAddr::V4(Ipv4Addr::new(185, 220, 101, 5));
+        let m = engine
+            .threat_intel()
+            .check_ip(tor_ip)
+            .expect("Must match baseline Tor exit");
+        assert_eq!(m.threat_type, "Tor Anonymization Relay");
+
+        let now = Utc::now();
+        let conn = NetworkConnection {
+            id: "conn-tor".to_string(),
+            protocol: netscope_core::Protocol::Tcp,
+            local_addr: IpAddr::V4(Ipv4Addr::new(192, 168, 1, 50)),
+            local_port: 48210,
+            remote_addr: tor_ip,
+            remote_port: 443,
+            state: netscope_core::ConnectionState::Established,
+            inode: 12345,
+            process: None,
+            reverse_dns: None,
+            country: None,
+            city: None,
+            asn: None,
+            first_seen: now,
+            last_seen: now,
+        };
+
+        let alerts = engine.evaluate_connections(&[conn]);
+        assert_eq!(alerts.len(), 1);
+        assert_eq!(alerts[0].severity, AlertSeverity::Medium);
+        assert!(!alerts[0].title.contains("Malware"));
+        assert!(alerts[0].title.contains("Anonymizer / Privacy Relay"));
     }
 }
